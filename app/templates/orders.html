@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}订单明细 - 订单数据管理系统{% endblock %}
+{% block content %}
+<header class="page-head">
+  <div>
+    <p class="eyebrow">ORDER DETAIL</p>
+    <h1>订单明细</h1>
+  </div>
+  <a class="button ghost" href="/orders/export?{{ request.url.query }}">导出 CSV</a>
+</header>
+{% set show_product = true %}
+{% set show_order = true %}
+{% include "_filters.html" with context %}
+<section class="panel">
+  <table>
+    <thead>
+      <tr>
+        <th>发货时间</th><th>订单编号</th><th>来源</th><th>客户</th><th>部门</th><th>平台</th><th>店铺</th>
+        <th>产品</th><th>数量</th><th>应收</th><th>利润</th><th>收货人</th><th>电话</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>
+        <td>{{ row.ship_time }}</td>
+        <td>{{ row.order_no }}</td>
+        <td>{{ row.order_source }}</td>
+        <td><strong>{{ row.customer_name }}</strong><span class="sub">{{ row.customer_no }}</span></td>
+        <td>{{ row.dept }}</td>
+        <td>{{ row.platform }}</td>
+        <td>{{ row.shop_name }}</td>
+        <td><strong>{{ row.product_name }}</strong><span class="sub">{{ row.product_no }} / {{ row.sku_id }}</span></td>
+        <td>{{ "%.2f"|format(row.qty) }}</td>
+        <td>{{ "%.2f"|format(row.share_receivable) }}</td>
+        <td>{{ "%.2f"|format(row.profit) }}</td>
+        <td>{{ row.receiver_name|name_mask }}</td>
+        <td>{{ row.receiver_phone|phone_mask }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="13" class="empty">当前条件下暂无数据</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted">最多显示 200 行；导出最多 50000 行，并自动应用角色数据范围。</p>
+</section>
+{% endblock %}

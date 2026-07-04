@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+pymysql
+openpyxl
+jinja2
+python-multipart
+itsdangerous

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}订单数据管理系统{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">OD</div>
+        <div>
+          <strong>订单数据</strong>
+          <span>经营分析台</span>
+        </div>
+      </div>
+      <nav class="nav">
+        {% set perms = user.permissions if user else [] %}
+        <a class="{{ 'active' if current_path == '/dashboard' else '' }}" href="/dashboard">首页看板</a>
+        <a class="{{ 'active' if current_path == '/orders' else '' }}" href="/orders">订单明细</a>
+        {% if 'admin' in perms or 'import' in perms %}
+        <a class="{{ 'active' if current_path.startswith('/imports') else '' }}" href="/imports">数据导入</a>
+        {% endif %}
+        {% if 'admin' in perms or 'analytics' in perms %}
+        <a class="{{ 'active' if current_path == '/analytics/products' else '' }}" href="/analytics/products">产品分析</a>
+        <a class="{{ 'active' if current_path == '/analytics/shops' else '' }}" href="/analytics/shops">店铺平台</a>
+        {% endif %}
+        {% if 'admin' in perms or 'settings' in perms %}
+        <a class="{{ 'active' if current_path.startswith('/settings') else '' }}" href="/settings/users">系统配置</a>
+        {% endif %}
+      </nav>
+      {% if user %}
+      <form class="logout" method="post" action="/logout">
+        <div class="user-pill">{{ user.display_name }}<span>{{ user.username }}</span></div>
+        <button type="submit">退出</button>
+      </form>
+      {% endif %}
+    </aside>
+    <main class="main">
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

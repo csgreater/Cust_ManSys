@@ -1,0 +1,50 @@
+<form class="filters auto-filter" method="get">
+  <div class="date-filter" data-date-range>
+    <span class="filter-label">订单日期</span>
+    <button class="date-trigger" type="button" data-date-toggle>
+      <span class="date-icon">▣</span>
+      <strong data-date-label>{{ filters.start_time }} 至 {{ filters.end_time }}</strong>
+    </button>
+    <input type="hidden" name="start_time" value="{{ filters.start_time }}" data-date-start>
+    <input type="hidden" name="end_time" value="{{ filters.end_time }}" data-date-end>
+    <div class="date-popover" data-date-popover>
+      <div class="preset-list">
+        <button type="button" data-preset="last7">近7天</button>
+        <button type="button" data-preset="last30">近30天</button>
+        <button type="button" data-preset="lastWeek">上周</button>
+        <button type="button" data-preset="thisMonth">本月</button>
+        <button type="button" data-preset="lastMonth">上月</button>
+        <button type="button" data-preset="thisQuarter">本季度</button>
+        <button type="button" data-preset="firstHalf">上半年</button>
+        <button type="button" data-preset="secondHalf">下半年</button>
+        <button type="button" data-preset="lastYear">近一年</button>
+        <button type="button" data-preset="thisYear">今年</button>
+      </div>
+      <div class="date-range-panel">
+        <div class="date-range-head">自定义区间</div>
+        <div class="date-input-row">
+          <label>开始时间<input type="date" value="{{ filters.start_time }}" data-date-start-picker></label>
+          <span>至</span>
+          <label>结束时间<input type="date" value="{{ filters.end_time }}" data-date-end-picker></label>
+        </div>
+        <div class="date-actions">
+          <button type="button" class="ghost" data-date-cancel>取消</button>
+          <button type="button" data-date-apply>应用</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <label>部门<input name="dept" value="{{ filters.dept }}" placeholder="全部"></label>
+  <label>平台<input name="platform" value="{{ filters.platform }}" placeholder="全部"></label>
+  <label>店铺<input name="shop_name" value="{{ filters.shop_name }}" placeholder="全部"></label>
+  {% if show_category %}
+  <label>大类<input name="category" value="{{ filters.category }}" placeholder="全部"></label>
+  {% endif %}
+  {% if show_product %}
+  <label>产品/SKU<input name="product" value="{{ filters.product }}" placeholder="名称、货号、SKU"></label>
+  {% endif %}
+  {% if show_order %}
+  <label>订单号<input name="order_no" value="{{ filters.order_no }}" placeholder="订单编号"></label>
+  {% endif %}
+  <button class="filter-submit" type="submit">刷新</button>
+</form>

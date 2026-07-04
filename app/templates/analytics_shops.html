@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}店铺平台分析 - 订单数据管理系统{% endblock %}
+{% block content %}
+<header class="page-head"><div><p class="eyebrow">SHOPS</p><h1>店铺平台分析</h1></div></header>
+{% include "_filters.html" with context %}
+<section class="panel">
+  <table>
+    <thead><tr><th>平台</th><th>店铺</th><th>销量</th><th>销售额</th><th>利润</th><th>利润率</th></tr></thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>
+        <td>{{ row.platform }}</td>
+        <td>{{ row.shop_name }}</td>
+        <td>{{ "%.2f"|format(row.qty) }}</td>
+        <td>{{ "%.2f"|format(row.revenue) }}</td>
+        <td>{{ "%.2f"|format(row.profit) }}</td>
+        <td>{{ "%.2f"|format(row.profit_rate) }}%</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="empty">当前条件下暂无数据</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

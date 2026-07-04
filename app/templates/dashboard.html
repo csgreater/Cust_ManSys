@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}首页看板 - 订单数据管理系统{% endblock %}
+{% block content %}
+<header class="page-head">
+  <div>
+    <p class="eyebrow">DASHBOARD</p>
+    <h1>首页看板</h1>
+  </div>
+</header>
+{% include "_filters.html" with context %}
+<section class="metric-grid">
+  <div class="metric"><span>销售额</span><strong>{{ "%.2f"|format(summary.revenue) }}</strong></div>
+  <div class="metric"><span>销量</span><strong>{{ "%.2f"|format(summary.qty) }}</strong></div>
+  <div class="metric"><span>利润</span><strong>{{ "%.2f"|format(summary.profit) }}</strong></div>
+  <div class="metric"><span>利润率</span><strong>{{ "%.2f"|format(summary.profit_rate) }}%</strong></div>
+  <div class="metric"><span>订单数</span><strong>{{ summary.orders }}</strong></div>
+</section>
+<section class="panel">
+  <div class="panel-head">
+    <h2>TOP 产品</h2>
+    <a href="/analytics/products">查看产品分析</a>
+  </div>
+  <table>
+    <thead><tr><th>货品编号</th><th>产品名称</th><th>销量</th><th>销售额</th><th>利润</th></tr></thead>
+    <tbody>
+      {% for row in top_products %}
+      <tr>
+        <td>{{ row.product_no }}</td>
+        <td>{{ row.product_name }}</td>
+        <td>{{ "%.2f"|format(row.qty) }}</td>
+        <td>{{ "%.2f"|format(row.revenue) }}</td>
+        <td>{{ "%.2f"|format(row.profit) }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="empty">当前条件下暂无数据</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

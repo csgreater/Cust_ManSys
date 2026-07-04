@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 - 订单数据管理系统</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="login-body">
+  <main class="login-panel">
+    <section class="login-copy">
+      <p class="eyebrow">ORDER OPERATIONS</p>
+      <h1>订单数据管理系统</h1>
+      <p>面向月度订单导入、经营分析、产品利润和角色级数据范围的运营工作台。</p>
+    </section>
+    <form class="login-card" method="post" action="/login">
+      <h2>账号登录</h2>
+      {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+      <label>账号<input name="username" autocomplete="username" required></label>
+      <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit">进入系统</button>
+      <p class="muted">初始化账号：admin / importer / analyst / viewer</p>
+    </form>
+  </main>
+</body>
+</html>

@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}数据导入 - 订单数据管理系统{% endblock %}
+{% block content %}
+<header class="page-head">
+  <div>
+    <p class="eyebrow">IMPORT</p>
+    <h1>数据导入</h1>
+  </div>
+</header>
+<section class="split">
+  <form class="upload-panel" method="post" action="/imports/upload" enctype="multipart/form-data">
+    <h2>上传月度 Excel</h2>
+    {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+    <input type="file" name="file" accept=".xlsx,.xlsm" required>
+    <button type="submit">上传并校验</button>
+    <p class="muted">上传后先进入暂存批次，校验无异常后再确认入库。</p>
+  </form>
+  <section class="panel">
+    <div class="panel-head"><h2>最近导入批次</h2></div>
+    <table>
+      <thead><tr><th>批次</th><th>文件</th><th>状态</th><th>总行</th><th>成功</th><th>异常</th><th>时间</th></tr></thead>
+      <tbody>
+        {% for log in logs %}
+        <tr>
+          <td><a href="/imports/{{ log.batch_no }}">{{ log.batch_no }}</a></td>
+          <td>{{ log.file_name }}</td>
+          <td><span class="status">{{ log.status }}</span></td>
+          <td>{{ log.total_rows }}</td>
+          <td>{{ log.success_rows }}</td>
+          <td>{{ log.fail_rows }}</td>
+          <td>{{ log.import_time }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7" class="empty">暂无导入记录</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+</section>
+{% endblock %}

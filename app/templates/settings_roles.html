@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}角色数据范围 - 订单数据管理系统{% endblock %}
+{% block content %}
+<header class="page-head">
+  <div><p class="eyebrow">ROLE SCOPE</p><h1>角色数据范围</h1></div>
+  <a class="button ghost" href="/settings/users">用户列表</a>
+</header>
+{% if message %}<div class="notice">{{ message }}</div>{% endif %}
+<section class="role-grid">
+  {% for role in roles %}
+  <form class="role-card" method="post" action="/settings/roles">
+    <input type="hidden" name="role_id" value="{{ role.id }}">
+    <h2>{{ role.role_name }}</h2>
+    <p class="muted">{{ role.role_code }} / {{ role.permissions }}</p>
+    <label>部门范围<input name="dept_scope" value="{{ role.scopes.dept }}" placeholder="* 或逗号分隔"></label>
+    <label>平台范围<input name="platform_scope" value="{{ role.scopes.platform }}" placeholder="* 或逗号分隔"></label>
+    <label>店铺范围<input name="shop_scope" value="{{ role.scopes.shop }}" placeholder="* 或逗号分隔"></label>
+    <button type="submit">保存范围</button>
+  </form>
+  {% endfor %}
+</section>
+{% endblock %}
