@@ -10,6 +10,29 @@
 6. Confirm the application starts and `/healthz` plus `/readyz` return `200`.
 7. Change the default seeded passwords after first login if they were not customized through `.env`.
 
+## Existing database migrations
+
+If the production database was already created before the county/district field was added, run:
+
+```bash
+python scripts/migrate_add_district.py
+python scripts/check_db_ready.py
+```
+
+Equivalent SQL:
+
+```sql
+ALTER TABLE t_order_sku_detail
+  ADD COLUMN district VARCHAR(64) NOT NULL DEFAULT '' COMMENT 'district/county'
+  AFTER city;
+
+ALTER TABLE tmp_order_import
+  ADD COLUMN district VARCHAR(64) NOT NULL DEFAULT ''
+  AFTER city;
+```
+
+Run the SQL only if the columns do not already exist. The script is idempotent and safer for repeated execution.
+
 ## Recommended MySQL settings
 
 For a low-concurrency monthly import workload, start with:

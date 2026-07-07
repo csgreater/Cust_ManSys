@@ -40,6 +40,86 @@ REQUIRED_INDEXES = {
     "t_role_data_scope": {"PRIMARY", "uk_role_scope", "idx_scope_lookup"},
 }
 
+REQUIRED_COLUMNS = {
+    "t_order_sku_detail": {
+        "id",
+        "link_id",
+        "sku_id",
+        "order_source",
+        "customer_no",
+        "customer_name",
+        "dept",
+        "platform",
+        "shop_name",
+        "order_no",
+        "original_order_no",
+        "logistics_type",
+        "logistics_no",
+        "receiver_name",
+        "receiver_phone",
+        "category",
+        "product_name",
+        "product_no",
+        "unit",
+        "qty",
+        "share_receivable",
+        "province",
+        "city",
+        "district",
+        "ship_time",
+        "cost",
+        "express_fee",
+        "logistics_fee",
+        "freight",
+        "aux_material",
+        "share_cost",
+        "profit",
+        "create_time",
+        "update_time",
+        "is_deleted",
+    },
+    "tmp_order_import": {
+        "id",
+        "batch_no",
+        "row_no",
+        "link_id",
+        "sku_id",
+        "order_source",
+        "customer_no",
+        "customer_name",
+        "dept",
+        "platform",
+        "shop_name",
+        "order_no",
+        "original_order_no",
+        "logistics_type",
+        "logistics_no",
+        "receiver_name",
+        "receiver_phone",
+        "category",
+        "product_name",
+        "product_no",
+        "unit",
+        "qty",
+        "share_receivable",
+        "province",
+        "city",
+        "district",
+        "ship_time",
+        "cost",
+        "express_fee",
+        "logistics_fee",
+        "freight",
+        "aux_material",
+        "share_cost",
+        "excel_profit",
+        "profit",
+        "error_message",
+        "warning_message",
+        "create_time",
+    },
+}
+
 
 def main() -> None:
     cfg = parse_database_url()
@@ -67,6 +147,23 @@ def main() -> None:
                 missing_indexes = required_indexes - indexes
                 if missing_indexes:
                     errors.append(f"{table} missing indexes: {', '.join(sorted(missing_indexes))}")
+
+            for table, required_columns in REQUIRED_COLUMNS.items():
+                if table not in tables:
+                    continue
+                cur.execute(
+                    """
+                    SELECT COLUMN_NAME
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA = %(schema)s
+                      AND TABLE_NAME = %(table)s
+                    """,
+                    {"schema": cfg.database, "table": table},
+                )
+                columns = {row["COLUMN_NAME"] for row in cur.fetchall()}
+                missing_columns = required_columns - columns
+                if missing_columns:
+                    errors.append(f"{table} missing columns: {', '.join(sorted(missing_columns))}")
 
             cur.execute(
                 """
