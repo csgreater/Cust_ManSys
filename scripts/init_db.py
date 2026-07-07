@@ -17,10 +17,7 @@ def month_iter(start_year: int, end_year: int):
     month = 1
     while year <= end_year:
         current = date(year, month, 1)
-        if month == 12:
-            next_month = date(year + 1, 1, 1)
-        else:
-            next_month = date(year, month + 1, 1)
+        next_month = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
         yield current, next_month
         month += 1
         if month == 13:
@@ -32,11 +29,10 @@ def partition_sql() -> str:
     current_year = date.today().year
     start_year = min(2020, current_year - 3)
     end_year = current_year + 5
-    parts = []
-    for current, next_month in month_iter(start_year, end_year):
-        parts.append(
-            f"PARTITION p{current:%Y%m} VALUES LESS THAN (TO_DAYS('{next_month:%Y-%m-%d}'))"
-        )
+    parts = [
+        f"PARTITION p{current:%Y%m} VALUES LESS THAN (TO_DAYS('{next_month:%Y-%m-%d}'))"
+        for current, next_month in month_iter(start_year, end_year)
+    ]
     parts.append("PARTITION pmax VALUES LESS THAN MAXVALUE")
     return ",\n  ".join(parts)
 
@@ -46,7 +42,8 @@ def create_database() -> None:
     with connection(database="") as conn:
         with conn.cursor() as cur:
             cur.execute(
-                f"CREATE DATABASE IF NOT EXISTS `{cfg.database}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+                f"CREATE DATABASE IF NOT EXISTS `{cfg.database}` "
+                "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
             )
 
 
@@ -57,38 +54,38 @@ def create_tables() -> None:
             cur.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS t_order_sku_detail (
-                  id BIGINT NOT NULL AUTO_INCREMENT COMMENT '明细ID',
-                  link_id VARCHAR(64) NOT NULL DEFAULT '' COMMENT '商品链接Id',
-                  sku_id VARCHAR(64) NOT NULL COMMENT '商品链接SkuId',
-                  order_source VARCHAR(32) NOT NULL DEFAULT '' COMMENT '订单来源',
-                  customer_no VARCHAR(32) NOT NULL COMMENT '客户编号',
-                  customer_name VARCHAR(64) NOT NULL DEFAULT '' COMMENT '客户名称',
-                  dept VARCHAR(32) NOT NULL DEFAULT '' COMMENT '部门',
-                  platform VARCHAR(32) NOT NULL COMMENT '平台渠道',
-                  shop_name VARCHAR(64) NOT NULL COMMENT '店铺',
-                  order_no VARCHAR(64) NOT NULL COMMENT '订单编号',
-                  original_order_no VARCHAR(64) NOT NULL DEFAULT '' COMMENT '原始单号',
-                  logistics_type VARCHAR(32) NOT NULL DEFAULT '' COMMENT '物流方式',
-                  logistics_no VARCHAR(64) NOT NULL DEFAULT '' COMMENT '物流单号',
-                  receiver_name VARCHAR(32) NOT NULL DEFAULT '' COMMENT '收货人',
-                  receiver_phone VARCHAR(32) NOT NULL DEFAULT '' COMMENT '电话',
-                  category VARCHAR(32) NOT NULL COMMENT '大类',
-                  product_name VARCHAR(255) NOT NULL COMMENT '产品名称',
-                  product_no VARCHAR(64) NOT NULL COMMENT '货品编号',
-                  unit VARCHAR(16) NOT NULL COMMENT '单位',
-                  qty DECIMAL(10,2) NOT NULL DEFAULT 0 COMMENT '数量',
-                  share_receivable DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT '应收合计分摊',
-                  province VARCHAR(32) NOT NULL DEFAULT '' COMMENT '州省',
-                  city VARCHAR(64) NOT NULL DEFAULT '' COMMENT '区市',
-                  ship_time DATETIME NOT NULL COMMENT '发货时间',
-                  cost DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT '成本',
-                  express_fee DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT '快递费',
-                  logistics_fee DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT '物流费',
-                  freight DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT '运费',
-                  aux_material DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT '辅料',
-                  share_cost DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT '分摊费用',
+                  id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'detail id',
+                  link_id VARCHAR(64) NOT NULL DEFAULT '' COMMENT 'product link id',
+                  sku_id VARCHAR(64) NOT NULL DEFAULT '' COMMENT 'sku id, optional',
+                  order_source VARCHAR(32) NOT NULL DEFAULT '' COMMENT 'order source, optional',
+                  customer_no VARCHAR(32) NOT NULL COMMENT 'customer code',
+                  customer_name VARCHAR(64) NOT NULL DEFAULT '' COMMENT 'customer name',
+                  dept VARCHAR(32) NOT NULL DEFAULT '' COMMENT 'department',
+                  platform VARCHAR(32) NOT NULL COMMENT 'platform channel',
+                  shop_name VARCHAR(64) NOT NULL COMMENT 'shop name',
+                  order_no VARCHAR(64) NOT NULL COMMENT 'order number',
+                  original_order_no VARCHAR(64) NOT NULL DEFAULT '' COMMENT 'original order number',
+                  logistics_type VARCHAR(32) NOT NULL DEFAULT '' COMMENT 'logistics type',
+                  logistics_no VARCHAR(64) NOT NULL DEFAULT '' COMMENT 'logistics number',
+                  receiver_name VARCHAR(32) NOT NULL DEFAULT '' COMMENT 'receiver name',
+                  receiver_phone VARCHAR(32) NOT NULL DEFAULT '' COMMENT 'receiver phone',
+                  category VARCHAR(32) NOT NULL COMMENT 'product category',
+                  product_name VARCHAR(255) NOT NULL COMMENT 'product name',
+                  product_no VARCHAR(64) NOT NULL COMMENT 'product code',
+                  unit VARCHAR(16) NOT NULL COMMENT 'unit',
+                  qty DECIMAL(10,2) NOT NULL DEFAULT 0 COMMENT 'quantity',
+                  share_receivable DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT 'allocated receivable',
+                  province VARCHAR(32) NOT NULL DEFAULT '' COMMENT 'province',
+                  city VARCHAR(64) NOT NULL DEFAULT '' COMMENT 'city',
+                  ship_time DATETIME NOT NULL COMMENT 'ship time',
+                  cost DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT 'cost',
+                  express_fee DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT 'express fee',
+                  logistics_fee DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT 'logistics fee',
+                  freight DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT 'freight',
+                  aux_material DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT 'auxiliary material',
+                  share_cost DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT 'allocated cost',
                   profit DECIMAL(12,2) GENERATED ALWAYS AS
-                    (share_receivable - cost - freight - aux_material - share_cost) STORED COMMENT '系统计算利润',
+                    (share_receivable - cost - freight - aux_material - share_cost) STORED COMMENT 'calculated profit',
                   create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                   update_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                   is_deleted TINYINT NOT NULL DEFAULT 0,
@@ -103,7 +100,7 @@ def create_tables() -> None:
                   KEY idx_customer_time (customer_no, ship_time),
                   KEY idx_logistics_no (logistics_no)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-                COMMENT='订单SKU明细表'
+                COMMENT='order sku detail'
                 PARTITION BY RANGE (TO_DAYS(ship_time)) (
                   {parts}
                 )
@@ -152,7 +149,7 @@ def create_tables() -> None:
                   KEY idx_batch_no (batch_no),
                   KEY idx_batch_error (batch_no, error_message(100))
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-                COMMENT='订单导入暂存表'
+                COMMENT='order import staging'
                 """
             )
             cur.execute(
@@ -168,9 +165,11 @@ def create_tables() -> None:
                   duplicate_rows INT NOT NULL DEFAULT 0,
                   status VARCHAR(32) NOT NULL DEFAULT 'validated',
                   import_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                  remark VARCHAR(500) NOT NULL DEFAULT ''
+                  remark VARCHAR(500) NOT NULL DEFAULT '',
+                  KEY idx_status_time (status, import_time),
+                  KEY idx_import_time (import_time)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-                COMMENT='导入日志表'
+                COMMENT='import log'
                 """
             )
             cur.execute(
@@ -181,8 +180,10 @@ def create_tables() -> None:
                   display_name VARCHAR(64) NOT NULL,
                   password_hash VARCHAR(255) NOT NULL,
                   is_active TINYINT NOT NULL DEFAULT 1,
-                  create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                  create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  KEY idx_active_username (is_active, username)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                COMMENT='system user'
                 """
             )
             cur.execute(
@@ -193,6 +194,7 @@ def create_tables() -> None:
                   role_name VARCHAR(64) NOT NULL,
                   permissions VARCHAR(255) NOT NULL DEFAULT ''
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                COMMENT='system role'
                 """
             )
             cur.execute(
@@ -201,9 +203,11 @@ def create_tables() -> None:
                   user_id BIGINT NOT NULL,
                   role_id BIGINT NOT NULL,
                   PRIMARY KEY (user_id, role_id),
+                  KEY idx_role_id (role_id),
                   CONSTRAINT fk_user_role_user FOREIGN KEY (user_id) REFERENCES t_user(id),
                   CONSTRAINT fk_user_role_role FOREIGN KEY (role_id) REFERENCES t_role(id)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                COMMENT='user role relation'
                 """
             )
             cur.execute(
@@ -214,8 +218,10 @@ def create_tables() -> None:
                   scope_type VARCHAR(16) NOT NULL,
                   scope_value VARCHAR(64) NOT NULL,
                   UNIQUE KEY uk_role_scope (role_id, scope_type, scope_value),
+                  KEY idx_scope_lookup (scope_type, scope_value),
                   CONSTRAINT fk_scope_role FOREIGN KEY (role_id) REFERENCES t_role(id)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                COMMENT='role data scope'
                 """
             )
 
@@ -291,7 +297,7 @@ def main() -> None:
     seed_data()
     cfg = parse_database_url()
     print(f"Initialized database `{cfg.database}`.")
-    print("Seed users: admin/importer/analyst/viewer. Passwords come from .env or .env.example defaults.")
+    print("Seed users: admin/importer/analyst/viewer. Passwords come from .env or defaults.")
 
 
 if __name__ == "__main__":

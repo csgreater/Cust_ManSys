@@ -21,13 +21,22 @@ from app.permissions import has_permission, load_user_context, requested_scope_f
 from app.security import verify_password
 
 
+settings.validate_for_runtime()
+
 app = FastAPI(title="订单数据管理系统")
-app.add_middleware(SessionMiddleware, secret_key=settings.secret_key, same_site="lax")
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=settings.secret_key,
+    same_site=settings.session_same_site,
+    https_only=settings.secure_cookies,
+    max_age=settings.session_max_age,
+)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "app" / "static"), name="static")
 FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
 if FRONTEND_DIST.exists():
     app.mount("/ui", StaticFiles(directory=FRONTEND_DIST, html=True), name="ui")
 templates = Jinja2Templates(directory=BASE_DIR / "app" / "templates")
+UPLOAD_CHUNK_SIZE = 1024 * 1024
 
 
 LEGACY_HTML_ROUTES = {
@@ -177,6 +186,50 @@ def mask_name(value: str | None) -> str:
 
 templates.env.filters["phone_mask"] = mask_phone
 templates.env.filters["name_mask"] = mask_name
+
+
+async def save_upload_to_temp(file: UploadFile) -> Path:
+    if not file.filename or not file.filename.lower().endswith((".xlsx", ".xlsm")):
+        raise HTTPException(status_code=400, detail="请上传 xlsx 或 xlsm 文件")
+
+    suffix = Path(file.filename).suffix
+    total = 0
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp_path = Path(tmp.name)
+            while True:
+                chunk = await file.read(UPLOAD_CHUNK_SIZE)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > settings.max_upload_bytes:
+                    raise HTTPException(status_code=413, detail=f"上传文件不能超过 {settings.max_upload_mb}MB")
+                tmp.write(chunk)
+        return tmp_path
+    except Exception:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+        raise
+    finally:
+        await file.close()
+
+
+@app.get("/healthz")
+def healthz():
+    return {"ok": True, "env": settings.app_env}
+
+
+@app.get("/readyz")
+def readyz():
+    try:
+        with connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 AS ok")
+                cur.fetchone()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="database unavailable") from exc
+    return {"ok": True, "database": "ready"}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -400,12 +453,7 @@ def api_imports(request: Request):
 @app.post("/api/imports/upload")
 async def api_import_upload(request: Request, file: UploadFile = File(...)):
     user = require_api_user(request, "import")
-    if not file.filename.lower().endswith((".xlsx", ".xlsm")):
-        raise HTTPException(status_code=400, detail="请上传 xlsx 或 xlsm 文件")
-    suffix = Path(file.filename).suffix
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(await file.read())
-        tmp_path = Path(tmp.name)
+    tmp_path = await save_upload_to_temp(file)
     try:
         result = parse_excel(tmp_path)
         save_import_batch(result, file.filename, user)
@@ -635,17 +683,16 @@ async def upload_import(request: Request, file: UploadFile = File(...)):
     user = require_user(request, "import")
     if isinstance(user, RedirectResponse):
         return user
-    if not file.filename.lower().endswith((".xlsx", ".xlsm")):
-        return render(request, "imports.html", {"user": user, "logs": [], "error": "请上传 xlsx 或 xlsm 文件"})
-    suffix = Path(file.filename).suffix
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(await file.read())
-        tmp_path = Path(tmp.name)
+    tmp_path: Path | None = None
     try:
+        tmp_path = await save_upload_to_temp(file)
         result = parse_excel(tmp_path)
         save_import_batch(result, file.filename, user)
+    except HTTPException as exc:
+        return render(request, "imports.html", {"user": user, "logs": [], "error": str(exc.detail)})
     except Exception as exc:
-        tmp_path.unlink(missing_ok=True)
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
         return render(request, "imports.html", {"user": user, "logs": [], "error": str(exc)})
     tmp_path.unlink(missing_ok=True)
     return redirect(f"/imports/{result.batch_no}")

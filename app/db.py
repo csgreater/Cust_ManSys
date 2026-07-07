@@ -47,6 +47,9 @@ def connection(database: str | None = None):
         database=database if database is not None else cfg.database,
         charset=cfg.charset,
         cursorclass=DictCursor,
+        connect_timeout=settings.db_connect_timeout,
+        read_timeout=settings.db_read_timeout,
+        write_timeout=settings.db_write_timeout,
         autocommit=False,
     )
     try:
