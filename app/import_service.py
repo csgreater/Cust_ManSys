@@ -33,6 +33,7 @@ HEADER_MAP = {
     "应收合计分摊": "share_receivable",
     "州省": "province",
     "区市": "city",
+    "区县": "district",
     "发货时间": "ship_time",
     "成本": "cost",
     "快递费": "express_fee",

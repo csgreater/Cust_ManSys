@@ -635,7 +635,7 @@ def orders_export(request: Request):
                 f"""
                 SELECT order_no, sku_id, order_source, customer_no, customer_name, dept, platform, shop_name,
                        category, product_name, product_no, unit, qty, share_receivable,
-                       province, city, ship_time, cost, express_fee, logistics_fee,
+                       province, city, district, ship_time, cost, express_fee, logistics_fee,
                        freight, aux_material, share_cost, profit
                 FROM t_order_sku_detail o
                 {where}
@@ -728,6 +728,7 @@ def save_import_batch(result: ImportParseResult, filename: str, user: dict[str, 
                     "share_receivable",
                     "province",
                     "city",
+                    "district",
                     "ship_time",
                     "cost",
                     "express_fee",
@@ -848,13 +849,13 @@ def import_commit(request: Request, batch_no: str):
                 INSERT INTO t_order_sku_detail (
                   link_id, sku_id, order_source, customer_no, customer_name, dept, platform, shop_name, order_no, original_order_no,
                   logistics_type, logistics_no, receiver_name, receiver_phone, category, product_name,
-                  product_no, unit, qty, share_receivable, province, city, ship_time, cost, express_fee,
+                  product_no, unit, qty, share_receivable, province, city, district, ship_time, cost, express_fee,
                   logistics_fee, freight, aux_material, share_cost
                 )
                 SELECT
                   link_id, sku_id, order_source, customer_no, customer_name, dept, platform, shop_name, order_no, original_order_no,
                   logistics_type, logistics_no, receiver_name, receiver_phone, category, product_name,
-                  product_no, unit, qty, share_receivable, province, city, ship_time, cost, express_fee,
+                  product_no, unit, qty, share_receivable, province, city, district, ship_time, cost, express_fee,
                   logistics_fee, freight, aux_material, share_cost
                 FROM tmp_order_import
                 WHERE batch_no = %(batch_no)s

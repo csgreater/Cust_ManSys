@@ -101,16 +101,17 @@
           <section v-if="view === 'orders'" class="panel">
             <div class="panel-title"><h2>订单明细</h2><span>最多显示 200 行</span></div>
             <table>
-              <thead><tr><th>发货时间</th><th>订单</th><th>来源</th><th>客户</th><th>平台/店铺</th><th>产品</th><th>数量</th><th>应收</th><th>利润</th></tr></thead>
-              <tbody>
-                <tr v-for="row in orders.rows" :key="row.id">
-                  <td>{{ row.ship_time }}</td><td>{{ row.order_no }}</td><td>{{ row.order_source }}</td>
-                  <td><b>{{ row.customer_name }}</b><small>{{ row.customer_no }}</small></td>
-                  <td>{{ row.platform }}<small>{{ row.shop_name }}</small></td>
-                  <td><b>{{ row.product_name }}</b><small>{{ row.category }} / {{ row.product_no }}</small></td>
-                  <td>{{ Money(row.qty) }}</td><td>{{ Money(row.share_receivable) }}</td><td>{{ Money(row.profit) }}</td>
-                </tr>
-                <tr v-if="!orders.rows?.length"><td colspan="9">暂无数据</td></tr>
+              <thead><tr><th>发货时间</th><th>订单</th><th>来源</th><th>客户</th><th>地区</th><th>平台/店铺</th><th>产品</th><th>数量</th><th>应收</th><th>利润</th></tr></thead>
+                <tbody>
+                  <tr v-for="row in orders.rows" :key="row.id">
+                    <td>{{ row.ship_time }}</td><td>{{ row.order_no }}</td><td>{{ row.order_source }}</td>
+                    <td><b>{{ row.customer_name }}</b><small>{{ row.customer_no }}</small></td>
+                    <td><b>{{ row.province }}</b><small>{{ row.city }}<span v-if="row.district"> / {{ row.district }}</span></small></td>
+                    <td>{{ row.platform }}<small>{{ row.shop_name }}</small></td>
+                    <td><b>{{ row.product_name }}</b><small>{{ row.category }} / {{ row.product_no }}</small></td>
+                    <td>{{ Money(row.qty) }}</td><td>{{ Money(row.share_receivable) }}</td><td>{{ Money(row.profit) }}</td>
+                  </tr>
+                  <tr v-if="!orders.rows?.length"><td colspan="10">暂无数据</td></tr>
               </tbody>
             </table>
           </section>
@@ -553,8 +554,8 @@ const OrdersView = defineComponent({
   template: `
     <section class="panel">
       <div class="panel-title"><h2>订单明细</h2><span>最多显示 200 行</span></div>
-      <table><thead><tr><th>发货时间</th><th>订单</th><th>来源</th><th>客户</th><th>平台/店铺</th><th>产品</th><th>数量</th><th>应收</th><th>利润</th></tr></thead>
-      <tbody><tr v-for="row in rows" :key="row.id"><td>{{ row.ship_time }}</td><td>{{ row.order_no }}</td><td>{{ row.order_source }}</td><td><b>{{ row.customer_name }}</b><small>{{ row.customer_no }}</small></td><td>{{ row.platform }}<small>{{ row.shop_name }}</small></td><td><b>{{ row.product_name }}</b><small>{{ row.category }} / {{ row.product_no }}</small></td><td>{{ Money(row.qty) }}</td><td>{{ Money(row.share_receivable) }}</td><td>{{ Money(row.profit) }}</td></tr><tr v-if="!rows?.length"><td colspan="9">暂无数据</td></tr></tbody></table>
+      <table><thead><tr><th>发货时间</th><th>订单</th><th>来源</th><th>客户</th><th>地区</th><th>平台/店铺</th><th>产品</th><th>数量</th><th>应收</th><th>利润</th></tr></thead>
+      <tbody><tr v-for="row in rows" :key="row.id"><td>{{ row.ship_time }}</td><td>{{ row.order_no }}</td><td>{{ row.order_source }}</td><td><b>{{ row.customer_name }}</b><small>{{ row.customer_no }}</small></td><td><b>{{ row.province }}</b><small>{{ row.city }}<span v-if="row.district"> / {{ row.district }}</span></small></td><td>{{ row.platform }}<small>{{ row.shop_name }}</small></td><td><b>{{ row.product_name }}</b><small>{{ row.category }} / {{ row.product_no }}</small></td><td>{{ Money(row.qty) }}</td><td>{{ Money(row.share_receivable) }}</td><td>{{ Money(row.profit) }}</td></tr><tr v-if="!rows?.length"><td colspan="10">暂无数据</td></tr></tbody></table>
     </section>`
 });
 
