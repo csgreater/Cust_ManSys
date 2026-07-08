@@ -122,6 +122,19 @@ REQUIRED_COLUMNS = {
     },
 }
 
+REQUIRED_COLUMN_LENGTHS = {
+    "t_order_sku_detail": {
+        "order_no": 128,
+        "original_order_no": 512,
+        "receiver_address": 512,
+    },
+    "tmp_order_import": {
+        "order_no": 128,
+        "original_order_no": 512,
+        "receiver_address": 512,
+    },
+}
+
 
 def main() -> None:
     cfg = parse_database_url()
@@ -166,6 +179,29 @@ def main() -> None:
                 missing_columns = required_columns - columns
                 if missing_columns:
                     errors.append(f"{table} missing columns: {', '.join(sorted(missing_columns))}")
+
+            for table, required_lengths in REQUIRED_COLUMN_LENGTHS.items():
+                if table not in tables:
+                    continue
+                cur.execute(
+                    """
+                    SELECT COLUMN_NAME, CHARACTER_MAXIMUM_LENGTH
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA = %(schema)s
+                      AND TABLE_NAME = %(table)s
+                      AND COLUMN_NAME IN %(columns)s
+                    """,
+                    {"schema": cfg.database, "table": table, "columns": tuple(required_lengths)},
+                )
+                lengths = {row["COLUMN_NAME"]: row["CHARACTER_MAXIMUM_LENGTH"] for row in cur.fetchall()}
+                for column, required_length in required_lengths.items():
+                    actual_length = lengths.get(column)
+                    if actual_length is None:
+                        continue
+                    if int(actual_length) < required_length:
+                        errors.append(
+                            f"{table}.{column} length {actual_length} is less than required {required_length}"
+                        )
 
             cur.execute(
                 """
