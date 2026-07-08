@@ -22,7 +22,7 @@ REQUIRED_TABLES = {
 REQUIRED_INDEXES = {
     "t_order_sku_detail": {
         "PRIMARY",
-        "uk_order_sku_product_time",
+        "idx_order_sku_product_time",
         "idx_ship_time",
         "idx_product_no_time",
         "idx_sku_time",
@@ -33,7 +33,7 @@ REQUIRED_INDEXES = {
         "idx_logistics_no",
     },
     "tmp_order_import": {"PRIMARY", "idx_batch_no", "idx_batch_error", "idx_import_duplicate"},
-    "t_import_log": {"PRIMARY", "batch_no", "idx_status_time", "idx_import_time"},
+    "t_import_log": {"PRIMARY", "batch_no", "idx_file_hash_status", "idx_status_time", "idx_import_time"},
     "t_user": {"PRIMARY", "username", "idx_active_username"},
     "t_role": {"PRIMARY", "role_code"},
     "t_user_role": {"PRIMARY", "idx_role_id"},
@@ -120,6 +120,21 @@ REQUIRED_COLUMNS = {
         "warning_message",
         "create_time",
     },
+}
+
+REQUIRED_COLUMNS["t_import_log"] = {
+    "id",
+    "batch_no",
+    "import_user",
+    "file_name",
+    "total_rows",
+    "success_rows",
+    "fail_rows",
+    "duplicate_rows",
+    "file_hash",
+    "status",
+    "import_time",
+    "remark",
 }
 
 REQUIRED_COLUMN_LENGTHS = {

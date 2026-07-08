@@ -92,7 +92,7 @@ def create_tables() -> None:
                   update_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                   is_deleted TINYINT NOT NULL DEFAULT 0,
                   PRIMARY KEY (id, ship_time),
-                  UNIQUE KEY uk_order_sku_product_time (order_no, sku_id, product_no, ship_time),
+                  KEY idx_order_sku_product_time (order_no, sku_id, product_no, ship_time),
                   KEY idx_ship_time (ship_time),
                   KEY idx_product_no_time (product_no, ship_time),
                   KEY idx_sku_time (sku_id, ship_time),
@@ -168,9 +168,11 @@ def create_tables() -> None:
                   success_rows INT NOT NULL DEFAULT 0,
                   fail_rows INT NOT NULL DEFAULT 0,
                   duplicate_rows INT NOT NULL DEFAULT 0,
+                  file_hash VARCHAR(64) NOT NULL DEFAULT '',
                   status VARCHAR(32) NOT NULL DEFAULT 'validated',
                   import_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                   remark VARCHAR(500) NOT NULL DEFAULT '',
+                  KEY idx_file_hash_status (file_hash, status),
                   KEY idx_status_time (status, import_time),
                   KEY idx_import_time (import_time)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci

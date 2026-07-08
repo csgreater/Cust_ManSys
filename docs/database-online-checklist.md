@@ -39,6 +39,7 @@ If the production database was already created before the receiver address field
 python scripts/migrate_add_receiver_address.py
 python scripts/migrate_import_performance_indexes.py
 python scripts/migrate_widen_order_text_fields.py
+python scripts/migrate_import_rule_changes.py
 python scripts/check_db_ready.py
 ```
 
@@ -65,6 +66,14 @@ ALTER TABLE tmp_order_import
   MODIFY COLUMN order_no VARCHAR(128) NOT NULL DEFAULT '' COMMENT 'order number',
   MODIFY COLUMN original_order_no VARCHAR(512) NOT NULL DEFAULT '' COMMENT 'original order number',
   MODIFY COLUMN receiver_address VARCHAR(512) NOT NULL DEFAULT '' COMMENT 'receiver address';
+
+ALTER TABLE t_import_log
+  ADD COLUMN file_hash VARCHAR(64) NOT NULL DEFAULT '' AFTER duplicate_rows,
+  ADD INDEX idx_file_hash_status (file_hash, status);
+
+ALTER TABLE t_order_sku_detail
+  DROP INDEX uk_order_sku_product_time,
+  ADD INDEX idx_order_sku_product_time (order_no, sku_id, product_no, ship_time);
 ```
 
 ## Recommended MySQL settings

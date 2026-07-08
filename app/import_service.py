@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from collections.abc import Iterator
 from typing import Any
 from uuid import uuid4
 
@@ -49,18 +49,13 @@ HEADER_MAP = {
 REQUIRED_HEADERS = list(HEADER_MAP.keys())
 REQUIRED_FIELDS = {
     "customer_no",
-    "customer_name",
+    "dept",
     "platform",
     "shop_name",
-    "order_no",
-    "category",
-    "product_name",
     "product_no",
-    "unit",
-    "qty",
     "share_receivable",
-    "ship_time",
     "cost",
+    "excel_profit",
 }
 DECIMAL_FIELDS = {
     "qty",
@@ -73,7 +68,8 @@ DECIMAL_FIELDS = {
     "share_cost",
     "excel_profit",
 }
-NON_NEGATIVE_FIELDS = DECIMAL_FIELDS - {"excel_profit"}
+NON_NEGATIVE_FIELDS: set[str] = set()
+DEFAULT_SHIP_TIME = datetime(1970, 1, 1)
 
 
 @dataclass(frozen=True)
@@ -149,8 +145,6 @@ def iter_excel_rows(path: Path, batch_no: str) -> Iterator[dict[str, Any]]:
         if not header_row:
             raise ValueError("Excel 文件为空")
         indexes = header_indexes([to_text(value) for value in header_row])
-        seen_keys: dict[tuple[str, str], int] = {}
-
         for row_no, values in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
             if not any(value not in (None, "") for value in values):
                 continue
@@ -177,16 +171,8 @@ def iter_excel_rows(path: Path, batch_no: str) -> Iterator[dict[str, Any]]:
                 if item.get(field, Decimal("0")) < 0:
                     errors.append(f"{field}不能为负数")
             if item.get("ship_time") is None:
-                errors.append("ship_time不能为空")
-
-            order_key = (
-                item.get("order_no") or "",
-                item.get("sku_id") or item.get("product_no") or "",
-            )
-            if order_key in seen_keys:
-                errors.append(f"本批重复，首次出现行号 {seen_keys[order_key]}")
-            elif all(order_key):
-                seen_keys[order_key] = row_no
+                item["ship_time"] = DEFAULT_SHIP_TIME
+                warnings.append("发货时间为空，已按 1970-01-01 保存")
 
             item["profit"] = calc_profit(item)
             excel_profit = item.get("excel_profit")

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import csv
+import hashlib
+import json
 import tempfile
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -757,6 +759,27 @@ def insert_tmp_import_rows(cur, rows: list[dict[str, Any]]) -> None:
     )
 
 
+def fingerprint_value(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return str(value.normalize())
+    if isinstance(value, datetime):
+        return value.isoformat(sep=" ")
+    if isinstance(value, date):
+        return value.isoformat()
+    return value
+
+
+def update_batch_fingerprint(hasher: Any, row: dict[str, Any]) -> None:
+    fingerprint_columns = [
+        column
+        for column in IMPORT_COLUMNS
+        if column not in {"batch_no", "row_no", "profit", "error_message", "warning_message"}
+    ]
+    payload = {column: fingerprint_value(row.get(column)) for column in fingerprint_columns}
+    hasher.update(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    hasher.update(b"\n")
+
+
 def create_import_batch(batch_no: str, filename: str, username: str) -> None:
     with connection() as conn:
         with conn.cursor() as cur:
@@ -764,9 +787,9 @@ def create_import_batch(batch_no: str, filename: str, username: str) -> None:
             cur.execute(
                 """
                 INSERT INTO t_import_log
-                    (batch_no, import_user, file_name, total_rows, success_rows, fail_rows, duplicate_rows, status, remark)
+                    (batch_no, import_user, file_name, total_rows, success_rows, fail_rows, duplicate_rows, file_hash, status, remark)
                 VALUES
-                    (%(batch_no)s, %(user)s, %(file_name)s, 0, 0, 0, 0, 'processing', '文件已上传，等待解析')
+                    (%(batch_no)s, %(user)s, %(file_name)s, 0, 0, 0, 0, '', 'processing', '文件已上传，等待解析')
                 ON DUPLICATE KEY UPDATE
                     import_user = VALUES(import_user),
                     file_name = VALUES(file_name),
@@ -774,6 +797,7 @@ def create_import_batch(batch_no: str, filename: str, username: str) -> None:
                     success_rows = 0,
                     fail_rows = 0,
                     duplicate_rows = 0,
+                    file_hash = '',
                     status = 'processing',
                     remark = '文件已上传，等待解析'
                 """,
@@ -803,24 +827,41 @@ def update_import_log(batch_no: str, status: str, total_rows: int, fail_rows: in
             )
 
 
-def finalize_import_batch(batch_no: str, total_rows: int, fail_rows: int) -> None:
+def finalize_import_batch(batch_no: str, total_rows: int, fail_rows: int, file_hash: str) -> None:
     with connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                UPDATE tmp_order_import t
-                INNER JOIN t_order_sku_detail o
-                  ON o.order_no = t.order_no
-                 AND o.ship_time = t.ship_time
-                 AND (
-                   (t.sku_id <> '' AND o.sku_id = t.sku_id)
-                   OR (t.sku_id = '' AND o.product_no = t.product_no)
-                 )
-                SET t.error_message = TRIM(BOTH '; ' FROM CONCAT_WS('; ', NULLIF(t.error_message, ''), '与历史数据重复'))
-                WHERE t.batch_no = %(batch_no)s
+                SELECT batch_no
+                FROM t_import_log
+                WHERE file_hash = %(file_hash)s
+                  AND status = 'committed'
+                  AND batch_no <> %(batch_no)s
+                LIMIT 1
                 """,
-                {"batch_no": batch_no},
+                {"batch_no": batch_no, "file_hash": file_hash},
             )
+            duplicate_batch = cur.fetchone()
+            if duplicate_batch:
+                cur.execute(
+                    """
+                    UPDATE t_import_log
+                    SET total_rows = %(total_rows)s,
+                        fail_rows = %(total_rows)s,
+                        duplicate_rows = %(total_rows)s,
+                        file_hash = %(file_hash)s,
+                        status = 'failed',
+                        remark = %(remark)s
+                    WHERE batch_no = %(batch_no)s
+                    """,
+                    {
+                        "batch_no": batch_no,
+                        "total_rows": total_rows,
+                        "file_hash": file_hash,
+                        "remark": f"整批数据与已入库批次 {duplicate_batch['batch_no']} 重复",
+                    },
+                )
+                return
             cur.execute(
                 """
                 UPDATE t_import_log l
@@ -833,6 +874,7 @@ def finalize_import_batch(batch_no: str, total_rows: int, fail_rows: int) -> Non
                         SELECT COUNT(*) FROM tmp_order_import t
                         WHERE t.batch_no = l.batch_no AND t.error_message LIKE '%%重复%%'
                     ),
+                    file_hash = %(file_hash)s,
                     status = 'validated',
                     remark = %(remark)s
                 WHERE l.batch_no = %(batch_no)s
@@ -840,6 +882,7 @@ def finalize_import_batch(batch_no: str, total_rows: int, fail_rows: int) -> Non
                 {
                     "batch_no": batch_no,
                     "total_rows": total_rows,
+                    "file_hash": file_hash,
                     "remark": f"共 {total_rows} 行，异常 {fail_rows} 行",
                 },
             )
@@ -849,10 +892,12 @@ def process_import_batch(tmp_path: Path, batch_no: str, filename: str, username:
     total_rows = 0
     fail_rows = 0
     buffer: list[dict[str, Any]] = []
+    hasher = hashlib.sha256()
     try:
         update_import_log(batch_no, "processing", 0, 0, "正在解析 Excel")
         for row in iter_excel_rows(tmp_path, batch_no):
             total_rows += 1
+            update_batch_fingerprint(hasher, row)
             if row["error_message"]:
                 fail_rows += 1
             buffer.append(row)
@@ -875,8 +920,8 @@ def process_import_batch(tmp_path: Path, batch_no: str, filename: str, username:
                 with conn.cursor() as cur:
                     insert_tmp_import_rows(cur, buffer)
 
-        update_import_log(batch_no, "processing", total_rows, fail_rows, "正在执行历史重复校验")
-        finalize_import_batch(batch_no, total_rows, fail_rows)
+        update_import_log(batch_no, "processing", total_rows, fail_rows, "正在检查整批重复导入")
+        finalize_import_batch(batch_no, total_rows, fail_rows, hasher.hexdigest())
     except Exception as exc:
         update_import_log(batch_no, "failed", total_rows, fail_rows, f"导入失败：{exc}")
     finally:
@@ -892,27 +937,12 @@ def save_import_batch(result: ImportParseResult, filename: str, user: dict[str, 
             cur.execute("DELETE FROM tmp_order_import WHERE batch_no = %(batch_no)s", {"batch_no": result.batch_no})
             if result.rows:
                 insert_tmp_import_rows(cur, result.rows)
-                cur.execute(
-                    """
-                    UPDATE tmp_order_import t
-                    INNER JOIN t_order_sku_detail o
-                      ON o.order_no = t.order_no
-                     AND o.ship_time = t.ship_time
-                     AND (
-                       (t.sku_id <> '' AND o.sku_id = t.sku_id)
-                       OR (t.sku_id = '' AND o.product_no = t.product_no)
-                     )
-                    SET t.error_message = TRIM(BOTH '; ' FROM CONCAT_WS('; ', NULLIF(t.error_message, ''), '与历史数据重复'))
-                    WHERE t.batch_no = %(batch_no)s
-                    """,
-                    {"batch_no": result.batch_no},
-                )
             cur.execute(
                 """
                 INSERT INTO t_import_log
-                    (batch_no, import_user, file_name, total_rows, success_rows, fail_rows, duplicate_rows, status, remark)
+                    (batch_no, import_user, file_name, total_rows, success_rows, fail_rows, duplicate_rows, file_hash, status, remark)
                 VALUES
-                    (%(batch_no)s, %(user)s, %(file_name)s, %(total_rows)s, 0, %(fail_rows)s, 0, 'validated', %(remark)s)
+                    (%(batch_no)s, %(user)s, %(file_name)s, %(total_rows)s, 0, %(fail_rows)s, 0, '', 'validated', %(remark)s)
                 ON DUPLICATE KEY UPDATE
                     file_name = VALUES(file_name),
                     total_rows = VALUES(total_rows),
@@ -984,6 +1014,8 @@ def import_commit(request: Request, batch_no: str):
                 raise HTTPException(status_code=404, detail="导入批次不存在")
             if log["status"] == "committed":
                 return redirect(f"/imports/{batch_no}")
+            if log["status"] != "validated":
+                raise HTTPException(status_code=400, detail="批次尚未校验完成，不能确认入库")
             cur.execute(
                 "SELECT COUNT(*) AS c FROM tmp_order_import WHERE batch_no = %(batch_no)s AND COALESCE(error_message, '') <> ''",
                 {"batch_no": batch_no},
