@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from collections.abc import Iterator
 from typing import Any
 from uuid import uuid4
 
@@ -127,29 +128,28 @@ def calc_profit(row: dict[str, Any]) -> Decimal:
     )
 
 
-def parse_excel(path: Path, batch_no: str | None = None) -> ImportParseResult:
-    batch_no = batch_no or new_batch_no()
+def header_indexes(headers: list[str]) -> dict[str, int]:
+    missing = [header for header in REQUIRED_HEADERS if header not in headers]
+    if missing:
+        detected = "、".join(header for header in headers if header)
+        expected = "、".join(REQUIRED_HEADERS)
+        raise ValueError(
+            f"Excel 表头不匹配，缺少字段：{', '.join(missing)}。"
+            f"当前识别到：{detected or '空表头'}。"
+            f"请使用模板字段：{expected}"
+        )
+    return {HEADER_MAP[header]: headers.index(header) for header in REQUIRED_HEADERS}
+
+
+def iter_excel_rows(path: Path, batch_no: str) -> Iterator[dict[str, Any]]:
     wb = load_workbook(path, read_only=True, data_only=True)
     try:
         ws = wb.active
         header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
         if not header_row:
             raise ValueError("Excel 文件为空")
-        headers = [to_text(value) for value in header_row]
-        missing = [header for header in REQUIRED_HEADERS if header not in headers]
-        if missing:
-            detected = "、".join(header for header in headers if header)
-            expected = "、".join(REQUIRED_HEADERS)
-            raise ValueError(
-                f"Excel 表头不匹配，缺少字段：{', '.join(missing)}。"
-                f"当前识别到：{detected or '空表头'}。"
-                f"请使用模板字段：{expected}"
-            )
-
-        indexes = {HEADER_MAP[header]: headers.index(header) for header in REQUIRED_HEADERS}
-        rows: list[dict[str, Any]] = []
+        indexes = header_indexes([to_text(value) for value in header_row])
         seen_keys: dict[tuple[str, str], int] = {}
-        fail_rows = 0
 
         for row_no, values in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
             if not any(value not in (None, "") for value in values):
@@ -195,16 +195,19 @@ def parse_excel(path: Path, batch_no: str | None = None) -> ImportParseResult:
 
             item["error_message"] = "; ".join(errors)
             item["warning_message"] = "; ".join(warnings)
-            if errors:
-                fail_rows += 1
-            rows.append(item)
-
-        return ImportParseResult(
-            batch_no=batch_no,
-            rows=rows,
-            total_rows=len(rows),
-            fail_rows=fail_rows,
-            error_summary=f"共 {len(rows)} 行，异常 {fail_rows} 行",
-        )
+            yield item
     finally:
         wb.close()
+
+
+def parse_excel(path: Path, batch_no: str | None = None) -> ImportParseResult:
+    batch_no = batch_no or new_batch_no()
+    rows = list(iter_excel_rows(path, batch_no))
+    fail_rows = sum(1 for row in rows if row["error_message"])
+    return ImportParseResult(
+        batch_no=batch_no,
+        rows=rows,
+        total_rows=len(rows),
+        fail_rows=fail_rows,
+        error_summary=f"共 {len(rows)} 行，异常 {fail_rows} 行",
+    )

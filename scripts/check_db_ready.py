@@ -32,7 +32,7 @@ REQUIRED_INDEXES = {
         "idx_customer_time",
         "idx_logistics_no",
     },
-    "tmp_order_import": {"PRIMARY", "idx_batch_no", "idx_batch_error"},
+    "tmp_order_import": {"PRIMARY", "idx_batch_no", "idx_batch_error", "idx_import_duplicate"},
     "t_import_log": {"PRIMARY", "batch_no", "idx_status_time", "idx_import_time"},
     "t_user": {"PRIMARY", "username", "idx_active_username"},
     "t_role": {"PRIMARY", "role_code"},

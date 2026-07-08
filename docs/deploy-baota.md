@@ -97,10 +97,10 @@ app.main:app
 http://127.0.0.1:8000
 ```
 
-Nginx 上传限制建议和 `.env` 的 `APP_MAX_UPLOAD_MB` 保持一致或略大：
+Nginx 上传限制建议和 `.env` 的 `APP_MAX_UPLOAD_MB` 保持一致或略大。12 万行左右的月度 Excel 建议从 200MB 起：
 
 ```nginx
-client_max_body_size 50m;
+client_max_body_size 200m;
 ```
 
 上线后访问：

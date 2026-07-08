@@ -7,7 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -16,7 +16,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import BASE_DIR, settings
 from app.db import connection
-from app.import_service import HEADER_MAP, ImportParseResult, parse_excel
+from app.import_service import HEADER_MAP, ImportParseResult, iter_excel_rows, new_batch_no, parse_excel
 from app.permissions import has_permission, load_user_context, requested_scope_filters, scope_clause
 from app.security import verify_password
 
@@ -37,6 +37,8 @@ if FRONTEND_DIST.exists():
     app.mount("/ui", StaticFiles(directory=FRONTEND_DIST, html=True), name="ui")
 templates = Jinja2Templates(directory=BASE_DIR / "app" / "templates")
 UPLOAD_CHUNK_SIZE = 1024 * 1024
+IMPORT_INSERT_CHUNK_SIZE = 1000
+IMPORT_PROGRESS_INTERVAL = 5000
 
 
 LEGACY_HTML_ROUTES = {
@@ -461,20 +463,17 @@ def api_imports(request: Request):
 
 
 @app.post("/api/imports/upload")
-async def api_import_upload(request: Request, file: UploadFile = File(...)):
+async def api_import_upload(request: Request, background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     user = require_api_user(request, "import")
+    batch_no = new_batch_no()
     tmp_path = await save_upload_to_temp(file)
     try:
-        result = parse_excel(tmp_path)
-        save_import_batch(result, file.filename, user)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    finally:
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except PermissionError:
-            pass
-    return api_ok({"batch_no": result.batch_no})
+        create_import_batch(batch_no, file.filename or "", user["username"])
+        background_tasks.add_task(process_import_batch, tmp_path, batch_no, file.filename or "", user["username"])
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    return api_ok({"batch_no": batch_no, "status": "processing"})
 
 
 @app.get("/api/imports/{batch_no}")
@@ -709,55 +708,190 @@ async def upload_import(request: Request, file: UploadFile = File(...)):
     return redirect(f"/imports/{result.batch_no}")
 
 
+IMPORT_COLUMNS = [
+    "batch_no",
+    "row_no",
+    "link_id",
+    "sku_id",
+    "order_source",
+    "customer_no",
+    "customer_name",
+    "dept",
+    "platform",
+    "shop_name",
+    "order_no",
+    "original_order_no",
+    "logistics_type",
+    "logistics_no",
+    "receiver_name",
+    "receiver_address",
+    "receiver_phone",
+    "category",
+    "product_name",
+    "product_no",
+    "unit",
+    "qty",
+    "share_receivable",
+    "province",
+    "city",
+    "district",
+    "ship_time",
+    "cost",
+    "express_fee",
+    "logistics_fee",
+    "freight",
+    "aux_material",
+    "share_cost",
+    "excel_profit",
+    "profit",
+    "error_message",
+    "warning_message",
+]
+
+
+def insert_tmp_import_rows(cur, rows: list[dict[str, Any]]) -> None:
+    placeholders = ",".join([f"%({column})s" for column in IMPORT_COLUMNS])
+    cur.executemany(
+        f"INSERT INTO tmp_order_import ({','.join(IMPORT_COLUMNS)}) VALUES ({placeholders})",
+        rows,
+    )
+
+
+def create_import_batch(batch_no: str, filename: str, username: str) -> None:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM tmp_order_import WHERE batch_no = %(batch_no)s", {"batch_no": batch_no})
+            cur.execute(
+                """
+                INSERT INTO t_import_log
+                    (batch_no, import_user, file_name, total_rows, success_rows, fail_rows, duplicate_rows, status, remark)
+                VALUES
+                    (%(batch_no)s, %(user)s, %(file_name)s, 0, 0, 0, 0, 'processing', '文件已上传，等待解析')
+                ON DUPLICATE KEY UPDATE
+                    import_user = VALUES(import_user),
+                    file_name = VALUES(file_name),
+                    total_rows = 0,
+                    success_rows = 0,
+                    fail_rows = 0,
+                    duplicate_rows = 0,
+                    status = 'processing',
+                    remark = '文件已上传，等待解析'
+                """,
+                {"batch_no": batch_no, "user": username, "file_name": filename},
+            )
+
+
+def update_import_log(batch_no: str, status: str, total_rows: int, fail_rows: int, remark: str) -> None:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE t_import_log
+                SET status = %(status)s,
+                    total_rows = %(total_rows)s,
+                    fail_rows = %(fail_rows)s,
+                    remark = %(remark)s
+                WHERE batch_no = %(batch_no)s
+                """,
+                {
+                    "batch_no": batch_no,
+                    "status": status,
+                    "total_rows": total_rows,
+                    "fail_rows": fail_rows,
+                    "remark": remark[:500],
+                },
+            )
+
+
+def finalize_import_batch(batch_no: str, total_rows: int, fail_rows: int) -> None:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE tmp_order_import t
+                INNER JOIN t_order_sku_detail o
+                  ON o.order_no = t.order_no
+                 AND o.ship_time = t.ship_time
+                 AND (
+                   (t.sku_id <> '' AND o.sku_id = t.sku_id)
+                   OR (t.sku_id = '' AND o.product_no = t.product_no)
+                 )
+                SET t.error_message = TRIM(BOTH '; ' FROM CONCAT_WS('; ', NULLIF(t.error_message, ''), '与历史数据重复'))
+                WHERE t.batch_no = %(batch_no)s
+                """,
+                {"batch_no": batch_no},
+            )
+            cur.execute(
+                """
+                UPDATE t_import_log l
+                SET total_rows = %(total_rows)s,
+                    fail_rows = (
+                        SELECT COUNT(*) FROM tmp_order_import t
+                        WHERE t.batch_no = l.batch_no AND COALESCE(t.error_message, '') <> ''
+                    ),
+                    duplicate_rows = (
+                        SELECT COUNT(*) FROM tmp_order_import t
+                        WHERE t.batch_no = l.batch_no AND t.error_message LIKE '%%重复%%'
+                    ),
+                    status = 'validated',
+                    remark = %(remark)s
+                WHERE l.batch_no = %(batch_no)s
+                """,
+                {
+                    "batch_no": batch_no,
+                    "total_rows": total_rows,
+                    "remark": f"共 {total_rows} 行，异常 {fail_rows} 行",
+                },
+            )
+
+
+def process_import_batch(tmp_path: Path, batch_no: str, filename: str, username: str) -> None:
+    total_rows = 0
+    fail_rows = 0
+    buffer: list[dict[str, Any]] = []
+    try:
+        update_import_log(batch_no, "processing", 0, 0, "正在解析 Excel")
+        for row in iter_excel_rows(tmp_path, batch_no):
+            total_rows += 1
+            if row["error_message"]:
+                fail_rows += 1
+            buffer.append(row)
+            if len(buffer) >= IMPORT_INSERT_CHUNK_SIZE:
+                with connection() as conn:
+                    with conn.cursor() as cur:
+                        insert_tmp_import_rows(cur, buffer)
+                buffer.clear()
+            if total_rows % IMPORT_PROGRESS_INTERVAL == 0:
+                update_import_log(
+                    batch_no,
+                    "processing",
+                    total_rows,
+                    fail_rows,
+                    f"已解析 {total_rows} 行，异常 {fail_rows} 行",
+                )
+
+        if buffer:
+            with connection() as conn:
+                with conn.cursor() as cur:
+                    insert_tmp_import_rows(cur, buffer)
+
+        update_import_log(batch_no, "processing", total_rows, fail_rows, "正在执行历史重复校验")
+        finalize_import_batch(batch_no, total_rows, fail_rows)
+    except Exception as exc:
+        update_import_log(batch_no, "failed", total_rows, fail_rows, f"导入失败：{exc}")
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except PermissionError:
+            pass
+
+
 def save_import_batch(result: ImportParseResult, filename: str, user: dict[str, Any]) -> None:
     with connection() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM tmp_order_import WHERE batch_no = %(batch_no)s", {"batch_no": result.batch_no})
             if result.rows:
-                columns = [
-                    "batch_no",
-                    "row_no",
-                    "link_id",
-                    "sku_id",
-                    "order_source",
-                    "customer_no",
-                    "customer_name",
-                    "dept",
-                    "platform",
-                    "shop_name",
-                    "order_no",
-                    "original_order_no",
-                    "logistics_type",
-                    "logistics_no",
-                    "receiver_name",
-                    "receiver_address",
-                    "receiver_phone",
-                    "category",
-                    "product_name",
-                    "product_no",
-                    "unit",
-                    "qty",
-                    "share_receivable",
-                    "province",
-                    "city",
-                    "district",
-                    "ship_time",
-                    "cost",
-                    "express_fee",
-                    "logistics_fee",
-                    "freight",
-                    "aux_material",
-                    "share_cost",
-                    "excel_profit",
-                    "profit",
-                    "error_message",
-                    "warning_message",
-                ]
-                placeholders = ",".join([f"%({column})s" for column in columns])
-                cur.executemany(
-                    f"INSERT INTO tmp_order_import ({','.join(columns)}) VALUES ({placeholders})",
-                    result.rows,
-                )
+                insert_tmp_import_rows(cur, result.rows)
                 cur.execute(
                     """
                     UPDATE tmp_order_import t

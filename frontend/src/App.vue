@@ -124,7 +124,9 @@
                 <h2>上传月度 Excel</h2>
                 <div v-if="importMessage.text" :class="importMessage.type === 'error' ? 'alert' : 'notice'">{{ importMessage.text }}</div>
                 <input type="file" accept=".xlsx,.xlsm" @change="selectedFile = $event.target.files[0]" />
-                <button class="primary" @click="selectedFile ? uploadFile(selectedFile) : showImportError('请先选择 Excel 文件')">上传并校验</button>
+                <button class="primary" :disabled="importBusy" @click="selectedFile ? uploadFile(selectedFile) : showImportError('请先选择 Excel 文件')">
+                  {{ importBusy ? "正在处理..." : "上传并校验" }}
+                </button>
               </div>
               <div class="panel">
                 <div class="panel-title"><h2>导入批次</h2><span>最近 50 条</span></div>
@@ -283,6 +285,7 @@ const loading = ref(false);
 const error = ref("");
 const rangeOpen = ref(false);
 const selectedFile = ref(null);
+const importBusy = ref(false);
 const importMessage = reactive({ type: "", text: "" });
 let filterTimer = null;
 const me = reactive({ authenticated: false, permissions: [], role_codes: [] });
@@ -432,16 +435,19 @@ function exportOrders() {
 async function uploadFile(file) {
   importMessage.text = "";
   importMessage.type = "";
+  importBusy.value = true;
   const form = new FormData();
   form.append("file", file);
   try {
     const data = await api("/api/imports/upload", { method: "POST", body: form });
-    importMessage.type = "success";
-    importMessage.text = "上传完成，已生成校验批次。";
+    importMessage.type = "notice";
+    importMessage.text = "文件已上传，系统正在后台解析校验。";
     await openImport(data.batch_no);
-    await loadCurrent();
+    await pollImport(data.batch_no);
   } catch (err) {
     showImportError(err.message);
+  } finally {
+    importBusy.value = false;
   }
 }
 
@@ -453,6 +459,33 @@ function showImportError(message) {
 async function openImport(batchNo) {
   const data = await api(`/api/imports/${batchNo}`);
   importDetail.value = data;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function importProgressText(log) {
+  if (!log) return "正在读取导入批次。";
+  const total = Number(log.total_rows || 0);
+  const fail = Number(log.fail_rows || 0);
+  if (log.status === "processing") return `${log.remark || "正在处理"}；已处理 ${total} 行，异常 ${fail} 行`;
+  if (log.status === "validated") return `校验完成：共 ${total} 行，异常 ${fail} 行`;
+  if (log.status === "failed") return log.remark || "导入失败";
+  return log.remark || `当前状态：${log.status}`;
+}
+
+async function pollImport(batchNo) {
+  for (let i = 0; i < 1800; i += 1) {
+    await sleep(i === 0 ? 0 : 2000);
+    await openImport(batchNo);
+    Object.assign(imports, await api("/api/imports"));
+    const log = importDetail.value?.log;
+    importMessage.type = log?.status === "failed" ? "error" : log?.status === "validated" ? "success" : "notice";
+    importMessage.text = importProgressText(log);
+    if (["validated", "failed", "committed"].includes(log?.status)) return;
+  }
+  throw new Error("后台导入仍在处理，请稍后从导入批次列表查看结果。");
 }
 
 async function commitImport(batchNo) {

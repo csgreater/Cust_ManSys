@@ -151,7 +151,8 @@ def create_tables() -> None:
                   warning_message VARCHAR(1000) NOT NULL DEFAULT '',
                   create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                   KEY idx_batch_no (batch_no),
-                  KEY idx_batch_error (batch_no, error_message(100))
+                  KEY idx_batch_error (batch_no, error_message(100)),
+                  KEY idx_import_duplicate (batch_no, order_no, ship_time, sku_id, product_no)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                 COMMENT='order import staging'
                 """
