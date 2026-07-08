@@ -124,6 +124,10 @@
                 <h2>上传月度 Excel</h2>
                 <div v-if="importMessage.text" :class="importMessage.type === 'error' ? 'alert' : 'notice'">{{ importMessage.text }}</div>
                 <input type="file" accept=".xlsx,.xlsm" @change="selectedFile = $event.target.files[0]" />
+                <div v-if="importBusy || uploadProgress > 0" class="upload-progress">
+                  <span :style="{ width: `${uploadProgress}%` }"></span>
+                  <b>{{ uploadProgress ? `${uploadProgress}%` : '等待服务器接收' }}</b>
+                </div>
                 <button class="primary" :disabled="importBusy" @click="selectedFile ? uploadFile(selectedFile) : showImportError('请先选择 Excel 文件')">
                   {{ importBusy ? "正在处理..." : "上传并校验" }}
                 </button>

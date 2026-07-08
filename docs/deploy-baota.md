@@ -123,3 +123,9 @@ python scripts/check_db_ready.py
 ```
 
 如果更新里包含数据库迁移脚本，先备份 MySQL，再执行对应 `scripts/migrate_*.py`。更新完成后在宝塔里重启 Python 项目或进程守护服务。
+
+低配服务器连续导入多个月份后，建议定期清理已完成或失败的导入暂存数据：
+
+```bash
+python scripts/cleanup_import_staging.py --days 7
+```

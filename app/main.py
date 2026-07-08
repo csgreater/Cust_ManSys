@@ -864,6 +864,7 @@ def finalize_import_batch(batch_no: str, total_rows: int, fail_rows: int, file_h
             )
             duplicate_batch = cur.fetchone()
             if duplicate_batch:
+                cur.execute("DELETE FROM tmp_order_import WHERE batch_no = %(batch_no)s", {"batch_no": batch_no})
                 cur.execute(
                     """
                     UPDATE t_import_log
@@ -945,6 +946,12 @@ def process_import_batch(tmp_path: Path, batch_no: str, filename: str, username:
         finalize_import_batch(batch_no, total_rows, fail_rows, hasher.hexdigest())
     except Exception as exc:
         update_import_log(batch_no, "failed", total_rows, fail_rows, f"导入失败：{exc}")
+        try:
+            with connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM tmp_order_import WHERE batch_no = %(batch_no)s", {"batch_no": batch_no})
+        except Exception:
+            pass
     finally:
         try:
             tmp_path.unlink(missing_ok=True)
