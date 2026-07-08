@@ -70,6 +70,9 @@ DECIMAL_FIELDS = {
 }
 NON_NEGATIVE_FIELDS: set[str] = set()
 DEFAULT_SHIP_TIME = datetime(1970, 1, 1)
+TEXT_MAX_LENGTHS = {
+    "receiver_name": 32,
+}
 
 
 @dataclass(frozen=True)
@@ -98,6 +101,14 @@ def to_text(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def normalize_text(field: str, value: Any) -> str:
+    text = to_text(value)
+    max_length = TEXT_MAX_LENGTHS.get(field)
+    if max_length is not None:
+        return text[:max_length]
+    return text
 
 
 def to_datetime(value: Any) -> datetime | None:
@@ -159,7 +170,7 @@ def iter_excel_rows(path: Path, batch_no: str) -> Iterator[dict[str, Any]]:
                     elif field in DECIMAL_FIELDS:
                         item[field] = to_decimal(value)
                     else:
-                        item[field] = to_text(value)
+                        item[field] = normalize_text(field, value)
                 except ValueError as exc:
                     item[field] = Decimal("0") if field in DECIMAL_FIELDS else None
                     errors.append(f"{field}{exc}")
