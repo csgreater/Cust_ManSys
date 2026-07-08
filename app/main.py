@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import gc
 import hashlib
 import json
 import tempfile
@@ -467,6 +468,9 @@ def api_imports(request: Request):
 @app.post("/api/imports/upload")
 async def api_import_upload(request: Request, background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     user = require_api_user(request, "import")
+    active_batch = active_import_batch()
+    if active_batch:
+        raise HTTPException(status_code=409, detail=f"已有导入批次正在处理：{active_batch}，请完成后再上传下一份。")
     batch_no = new_batch_no()
     tmp_path = await save_upload_to_temp(file)
     try:
@@ -805,6 +809,22 @@ def create_import_batch(batch_no: str, filename: str, username: str) -> None:
             )
 
 
+def active_import_batch() -> str | None:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT batch_no
+                FROM t_import_log
+                WHERE status = 'processing'
+                ORDER BY import_time DESC
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+            return row["batch_no"] if row else None
+
+
 def update_import_log(batch_no: str, status: str, total_rows: int, fail_rows: int, remark: str) -> None:
     with connection() as conn:
         with conn.cursor() as cur:
@@ -814,6 +834,7 @@ def update_import_log(batch_no: str, status: str, total_rows: int, fail_rows: in
                 SET status = %(status)s,
                     total_rows = %(total_rows)s,
                     fail_rows = %(fail_rows)s,
+                    import_time = NOW(),
                     remark = %(remark)s
                 WHERE batch_no = %(batch_no)s
                 """,
@@ -929,6 +950,8 @@ def process_import_batch(tmp_path: Path, batch_no: str, filename: str, username:
             tmp_path.unlink(missing_ok=True)
         except PermissionError:
             pass
+        buffer.clear()
+        gc.collect()
 
 
 def save_import_batch(result: ImportParseResult, filename: str, user: dict[str, Any]) -> None:
@@ -1049,6 +1072,7 @@ def import_commit(request: Request, batch_no: str):
                 """,
                 {"success_rows": success_rows, "batch_no": batch_no},
             )
+            cur.execute("DELETE FROM tmp_order_import WHERE batch_no = %(batch_no)s", {"batch_no": batch_no})
     return redirect(f"/imports/{batch_no}")
 
 

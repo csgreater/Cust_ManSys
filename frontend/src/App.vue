@@ -286,6 +286,7 @@ const error = ref("");
 const rangeOpen = ref(false);
 const selectedFile = ref(null);
 const importBusy = ref(false);
+const uploadProgress = ref(0);
 const importMessage = reactive({ type: "", text: "" });
 let filterTimer = null;
 const me = reactive({ authenticated: false, permissions: [], role_codes: [] });
@@ -436,10 +437,11 @@ async function uploadFile(file) {
   importMessage.text = "";
   importMessage.type = "";
   importBusy.value = true;
-  const form = new FormData();
-  form.append("file", file);
+  uploadProgress.value = 0;
   try {
-    const data = await api("/api/imports/upload", { method: "POST", body: form });
+    importMessage.type = "notice";
+    importMessage.text = "正在上传：0%";
+    const data = await uploadImportFile(file);
     importMessage.type = "notice";
     importMessage.text = "文件已上传，系统正在后台解析校验。";
     await openImport(data.batch_no);
@@ -448,7 +450,43 @@ async function uploadFile(file) {
     showImportError(err.message);
   } finally {
     importBusy.value = false;
+    uploadProgress.value = 0;
   }
+}
+
+function uploadImportFile(file) {
+  return new Promise((resolve, reject) => {
+    const form = new FormData();
+    form.append("file", file);
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/imports/upload", true);
+    xhr.withCredentials = true;
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable) {
+        importMessage.text = "正在上传文件...";
+        return;
+      }
+      uploadProgress.value = Math.round((event.loaded / event.total) * 100);
+      importMessage.type = "notice";
+      importMessage.text = `正在上传：${uploadProgress.value}%`;
+    };
+    xhr.onload = () => {
+      let body = {};
+      try {
+        body = xhr.responseText ? JSON.parse(xhr.responseText) : {};
+      } catch {
+        reject(new Error("上传响应解析失败"));
+        return;
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(body.data ?? body);
+      } else {
+        reject(new Error(body.detail || "上传失败"));
+      }
+    };
+    xhr.onerror = () => reject(new Error("上传网络异常，请稍后重试。"));
+    xhr.send(form);
+  });
 }
 
 function showImportError(message) {

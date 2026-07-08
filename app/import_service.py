@@ -71,7 +71,28 @@ DECIMAL_FIELDS = {
 NON_NEGATIVE_FIELDS: set[str] = set()
 DEFAULT_SHIP_TIME = datetime(1970, 1, 1)
 TEXT_MAX_LENGTHS = {
+    "link_id": 64,
+    "sku_id": 64,
+    "order_source": 32,
+    "customer_no": 32,
+    "customer_name": 64,
+    "dept": 32,
+    "platform": 32,
+    "shop_name": 64,
+    "order_no": 128,
+    "original_order_no": 512,
+    "logistics_type": 32,
+    "logistics_no": 64,
     "receiver_name": 32,
+    "receiver_address": 512,
+    "receiver_phone": 32,
+    "category": 32,
+    "product_name": 255,
+    "product_no": 64,
+    "unit": 16,
+    "province": 32,
+    "city": 64,
+    "district": 64,
 }
 
 
