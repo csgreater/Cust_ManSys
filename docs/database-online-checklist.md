@@ -33,6 +33,25 @@ ALTER TABLE tmp_order_import
 
 Run the SQL only if the columns do not already exist. The script is idempotent and safer for repeated execution.
 
+If the production database was already created before the receiver address field was added, run:
+
+```bash
+python scripts/migrate_add_receiver_address.py
+python scripts/check_db_ready.py
+```
+
+Equivalent SQL:
+
+```sql
+ALTER TABLE t_order_sku_detail
+  ADD COLUMN receiver_address VARCHAR(255) NOT NULL DEFAULT '' COMMENT 'receiver address'
+  AFTER receiver_name;
+
+ALTER TABLE tmp_order_import
+  ADD COLUMN receiver_address VARCHAR(255) NOT NULL DEFAULT '' COMMENT 'receiver address'
+  AFTER receiver_name;
+```
+
 ## Recommended MySQL settings
 
 For a low-concurrency monthly import workload, start with:

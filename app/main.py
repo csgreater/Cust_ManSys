@@ -184,8 +184,18 @@ def mask_name(value: str | None) -> str:
     return text[0] + "**" if len(text) > 1 else "*"
 
 
+def mask_address(value: str | None) -> str:
+    if not value:
+        return ""
+    text = str(value)
+    if len(text) <= 6:
+        return "***"
+    return f"{text[:3]}***{text[-3:]}"
+
+
 templates.env.filters["phone_mask"] = mask_phone
 templates.env.filters["name_mask"] = mask_name
+templates.env.filters["address_mask"] = mask_address
 
 
 async def save_upload_to_temp(file: UploadFile) -> Path:
@@ -635,6 +645,7 @@ def orders_export(request: Request):
                 f"""
                 SELECT order_no, sku_id, order_source, customer_no, customer_name, dept, platform, shop_name,
                        category, product_name, product_no, unit, qty, share_receivable,
+                       receiver_name, receiver_address, receiver_phone,
                        province, city, district, ship_time, cost, express_fee, logistics_fee,
                        freight, aux_material, share_cost, profit
                 FROM t_order_sku_detail o
@@ -719,6 +730,7 @@ def save_import_batch(result: ImportParseResult, filename: str, user: dict[str, 
                     "logistics_type",
                     "logistics_no",
                     "receiver_name",
+                    "receiver_address",
                     "receiver_phone",
                     "category",
                     "product_name",
@@ -848,13 +860,13 @@ def import_commit(request: Request, batch_no: str):
                 """
                 INSERT INTO t_order_sku_detail (
                   link_id, sku_id, order_source, customer_no, customer_name, dept, platform, shop_name, order_no, original_order_no,
-                  logistics_type, logistics_no, receiver_name, receiver_phone, category, product_name,
+                  logistics_type, logistics_no, receiver_name, receiver_address, receiver_phone, category, product_name,
                   product_no, unit, qty, share_receivable, province, city, district, ship_time, cost, express_fee,
                   logistics_fee, freight, aux_material, share_cost
                 )
                 SELECT
                   link_id, sku_id, order_source, customer_no, customer_name, dept, platform, shop_name, order_no, original_order_no,
-                  logistics_type, logistics_no, receiver_name, receiver_phone, category, product_name,
+                  logistics_type, logistics_no, receiver_name, receiver_address, receiver_phone, category, product_name,
                   product_no, unit, qty, share_receivable, province, city, district, ship_time, cost, express_fee,
                   logistics_fee, freight, aux_material, share_cost
                 FROM tmp_order_import

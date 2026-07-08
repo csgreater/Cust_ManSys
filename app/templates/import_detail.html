@@ -22,7 +22,7 @@
 <section class="panel">
   <div class="panel-head"><h2>暂存明细预览</h2><span>最多显示 200 行，异常行优先</span></div>
   <table>
-    <thead><tr><th>行号</th><th>订单</th><th>来源</th><th>客户</th><th>SKU</th><th>平台</th><th>店铺</th><th>产品</th><th>发货时间</th><th>利润</th><th>异常</th><th>提示</th></tr></thead>
+    <thead><tr><th>行号</th><th>订单</th><th>来源</th><th>客户</th><th>SKU</th><th>平台</th><th>店铺</th><th>收货地址</th><th>产品</th><th>发货时间</th><th>利润</th><th>异常</th><th>提示</th></tr></thead>
     <tbody>
       {% for row in rows %}
       <tr class="{{ 'bad' if row.error_message else '' }}">
@@ -33,6 +33,7 @@
         <td>{{ row.sku_id }}</td>
         <td>{{ row.platform }}</td>
         <td>{{ row.shop_name }}</td>
+        <td>{{ row.receiver_address|address_mask }}</td>
         <td>{{ row.product_name }}</td>
         <td>{{ row.ship_time }}</td>
         <td>{{ "%.2f"|format(row.profit) }}</td>
@@ -40,7 +41,7 @@
         <td>{{ row.warning_message }}</td>
       </tr>
       {% else %}
-      <tr><td colspan="12" class="empty">暂无暂存数据</td></tr>
+      <tr><td colspan="13" class="empty">暂无暂存数据</td></tr>
       {% endfor %}
     </tbody>
   </table>

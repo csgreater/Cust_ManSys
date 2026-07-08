@@ -101,17 +101,18 @@
           <section v-if="view === 'orders'" class="panel">
             <div class="panel-title"><h2>订单明细</h2><span>最多显示 200 行</span></div>
             <table>
-              <thead><tr><th>发货时间</th><th>订单</th><th>来源</th><th>客户</th><th>地区</th><th>平台/店铺</th><th>产品</th><th>数量</th><th>应收</th><th>利润</th></tr></thead>
+              <thead><tr><th>发货时间</th><th>订单</th><th>来源</th><th>客户</th><th>地区</th><th>收货地址</th><th>平台/店铺</th><th>产品</th><th>数量</th><th>应收</th><th>利润</th></tr></thead>
                 <tbody>
                   <tr v-for="row in orders.rows" :key="row.id">
                     <td>{{ row.ship_time }}</td><td>{{ row.order_no }}</td><td>{{ row.order_source }}</td>
                     <td><b>{{ row.customer_name }}</b><small>{{ row.customer_no }}</small></td>
                     <td><b>{{ row.province }}</b><small>{{ row.city }}<span v-if="row.district"> / {{ row.district }}</span></small></td>
+                    <td><b>{{ MaskName(row.receiver_name) }}</b><small>{{ MaskAddress(row.receiver_address) }}</small></td>
                     <td>{{ row.platform }}<small>{{ row.shop_name }}</small></td>
                     <td><b>{{ row.product_name }}</b><small>{{ row.category }} / {{ row.product_no }}</small></td>
                     <td>{{ Money(row.qty) }}</td><td>{{ Money(row.share_receivable) }}</td><td>{{ Money(row.profit) }}</td>
                   </tr>
-                  <tr v-if="!orders.rows?.length"><td colspan="10">暂无数据</td></tr>
+                  <tr v-if="!orders.rows?.length"><td colspan="11">暂无数据</td></tr>
               </tbody>
             </table>
           </section>
@@ -145,10 +146,11 @@
                 <button v-if="importDetail.log.status !== 'committed' && importDetail.log.fail_rows === 0 && importDetail.log.total_rows > 0" class="primary" @click="commitImport(importDetail.log.batch_no)">确认入库</button>
               </div>
               <table>
-                <thead><tr><th>行号</th><th>订单</th><th>客户</th><th>产品</th><th>利润</th><th>异常</th><th>提示</th></tr></thead>
+                <thead><tr><th>行号</th><th>订单</th><th>客户</th><th>地址</th><th>产品</th><th>利润</th><th>异常</th><th>提示</th></tr></thead>
                 <tbody>
                   <tr v-for="row in importDetail.rows" :key="row.id">
                     <td>{{ row.row_no }}</td><td>{{ row.order_no }}</td><td>{{ row.customer_name }} / {{ row.customer_no }}</td>
+                    <td>{{ MaskAddress(row.receiver_address) }}</td>
                     <td>{{ row.product_name }}</td><td>{{ Money(row.profit) }}</td><td>{{ row.error_message }}</td><td>{{ row.warning_message }}</td>
                   </tr>
                 </tbody>
@@ -259,6 +261,19 @@ const addMonths = (d, n) => new Date(d.getFullYear(), d.getMonth() + n, 1);
 const startOfMonth = (d) => new Date(d.getFullYear(), d.getMonth(), 1);
 function Money(value) {
   return Number(value || 0).toLocaleString("zh-CN", { maximumFractionDigits: 2 });
+}
+
+function MaskName(value) {
+  const text = String(value || "");
+  if (!text) return "";
+  return text.length > 1 ? `${text.slice(0, 1)}**` : "*";
+}
+
+function MaskAddress(value) {
+  const text = String(value || "");
+  if (!text) return "";
+  if (text.length <= 6) return "***";
+  return `${text.slice(0, 3)}***${text.slice(-3)}`;
 }
 const lastMonthStart = addMonths(startOfMonth(today), -1);
 const lastMonthEnd = addDays(startOfMonth(today), -1);

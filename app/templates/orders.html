@@ -16,7 +16,7 @@
     <thead>
       <tr>
         <th>发货时间</th><th>订单编号</th><th>来源</th><th>客户</th><th>部门</th><th>平台</th><th>店铺</th>
-        <th>产品</th><th>数量</th><th>应收</th><th>利润</th><th>收货人</th><th>电话</th>
+        <th>产品</th><th>数量</th><th>应收</th><th>利润</th><th>收货人</th><th>地址</th><th>电话</th>
       </tr>
     </thead>
     <tbody>
@@ -34,10 +34,11 @@
         <td>{{ "%.2f"|format(row.share_receivable) }}</td>
         <td>{{ "%.2f"|format(row.profit) }}</td>
         <td>{{ row.receiver_name|name_mask }}</td>
+        <td>{{ row.receiver_address|address_mask }}</td>
         <td>{{ row.receiver_phone|phone_mask }}</td>
       </tr>
       {% else %}
-      <tr><td colspan="13" class="empty">当前条件下暂无数据</td></tr>
+      <tr><td colspan="14" class="empty">当前条件下暂无数据</td></tr>
       {% endfor %}
     </tbody>
   </table>
