@@ -20,6 +20,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.config import BASE_DIR, settings
 from app.db import connection
 from app.import_service import HEADER_MAP, ImportParseResult, iter_excel_rows, new_batch_no, parse_excel
+from app.nl_analytics import build_chart, build_sql, normalize_rows, parse_question_filters, summarize_answer
 from app.permissions import has_permission, load_user_context, requested_scope_filters, scope_clause
 from app.security import verify_password
 
@@ -453,6 +454,39 @@ def api_shops(request: Request):
             )
             rows = list(cur.fetchall())
     return api_ok({"filters": filters, "rows": rows})
+
+
+@app.post("/api/analytics/ask")
+async def api_analytics_ask(request: Request):
+    user = require_api_user(request, "analytics")
+    body = await request.json()
+    question = str(body.get("question") or "").strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="请输入要分析的问题")
+
+    filters = parse_question_filters(question)
+    filters.update({key: value for key, value in (body.get("filters") or {}).items() if key in filters and value})
+    where, params = order_where(user, filters)
+    plan = build_sql(question, where, params)
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(plan["sql"], params)
+            rows = normalize_rows(list(cur.fetchall()))
+    chart = build_chart(question, rows, plan)
+    answer = summarize_answer(question, rows, plan)
+    return api_ok(
+        {
+            "question": question,
+            "answer": answer,
+            "filters": filters,
+            "sql": plan["sql"].replace("%%", "%"),
+            "sql_params": plan["params"],
+            "dimensions": plan["dimensions"],
+            "metrics": plan["metrics"],
+            "rows": rows,
+            "chart": chart,
+        }
+    )
 
 
 @app.get("/api/imports")

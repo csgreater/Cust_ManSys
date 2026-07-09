@@ -76,6 +76,65 @@
         <section v-if="loading" class="loading-panel">正在载入数据...</section>
 
         <template v-else>
+          <section v-if="view === 'smart'" class="smart-layout">
+            <section class="panel smart-query">
+              <div class="panel-title"><h2>自然语言分析</h2><span>生成受控 SQL 并返回图表</span></div>
+              <div class="smart-query-body">
+                <textarea v-model="smart.question" placeholder="例如：今年1-5月各产品销售额占比，按销售额排序"></textarea>
+                <div class="smart-actions">
+                  <button class="primary" :disabled="smart.busy" @click="askSmart"><Sparkles :size="16" /> {{ smart.busy ? "分析中..." : "开始分析" }}</button>
+                  <button v-for="example in smartExamples" :key="example" class="ghost" type="button" @click="smart.question = example; askSmart()">{{ example }}</button>
+                </div>
+                <div v-if="smart.error" class="alert">{{ smart.error }}</div>
+              </div>
+            </section>
+
+            <section v-if="smart.result" class="panel smart-answer">
+              <div class="panel-title"><h2>分析结论</h2><span>{{ smart.result.filters.start_time }} 至 {{ smart.result.filters.end_time }}</span></div>
+              <div class="smart-summary">{{ smart.result.answer }}</div>
+            </section>
+
+            <section v-if="smart.result" class="chart-grid">
+              <div class="panel">
+                <div class="panel-title"><h2>{{ smart.result.chart.metric_label }}图表</h2><span>{{ smart.result.chart.type }}</span></div>
+                <div v-if="smart.result.chart.type === 'pie'" class="smart-pie-wrap">
+                  <div class="smart-pie" :style="smartPieStyle"></div>
+                  <div class="smart-legend">
+                    <div v-for="point in smart.result.chart.points.slice(0, 12)" :key="point.label"><i></i><span>{{ point.label }}</span><b>{{ Number(point.value || 0).toFixed(2) }}%</b></div>
+                  </div>
+                </div>
+                <div v-else class="smart-bars">
+                  <div v-for="point in smart.result.chart.points" :key="point.label" class="smart-bar">
+                    <span>{{ point.label }}</span>
+                    <div><i :style="{ width: smartBarWidth(point.value) }"></i></div>
+                    <b>{{ formatSmartValue(point.value, smart.result.chart.metric) }}</b>
+                  </div>
+                </div>
+              </div>
+              <div class="panel">
+                <div class="panel-title"><h2>生成 SQL</h2><span>只读聚合查询</span></div>
+                <details class="sql-box" open>
+                  <summary>查看 SQL 与参数</summary>
+                  <pre>{{ smart.result.sql }}</pre>
+                  <pre>{{ JSON.stringify(smart.result.sql_params, null, 2) }}</pre>
+                </details>
+              </div>
+            </section>
+
+            <section v-if="smart.result" class="panel">
+              <div class="panel-title"><h2>查询结果</h2><span>最多展示 {{ smart.result.rows.length }} 行</span></div>
+              <table>
+                <thead><tr><th v-for="col in smartColumns" :key="col">{{ smartColumnLabel(col) }}</th></tr></thead>
+                <tbody>
+                  <tr v-for="(row, index) in smart.result.rows" :key="index">
+                    <td v-for="col in smartColumns" :key="col">{{ formatSmartCell(row[col], col) }}</td>
+                  </tr>
+                  <tr v-if="!smart.result.rows.length"><td :colspan="smartColumns.length || 1">暂无数据</td></tr>
+                </tbody>
+              </table>
+            </section>
+          </section>
+
           <section v-if="view === 'dashboard'">
             <section class="metric-grid">
               <article><span>销售额</span><strong>{{ Money(dashboard.summary.revenue) }}</strong></article>
@@ -254,6 +313,7 @@ import {
   FileSpreadsheet,
   LayoutDashboard,
   LineChart,
+  Sparkles,
   Settings,
   ShoppingBag,
   UploadCloud
@@ -313,8 +373,21 @@ const importDetail = ref(null);
 const products = reactive({ rows: [], category_rows: [] });
 const shops = reactive({ rows: [] });
 const settings = reactive({ users: [], roles: [] });
+const smart = reactive({
+  question: "今年1-5月各产品销售额占比，按销售额排序",
+  result: null,
+  busy: false,
+  error: ""
+});
+const smartExamples = [
+  "今年1-5月各产品销售额占比",
+  "今年1-5月各店铺利润排名",
+  "今年1-5月按月销售额趋势",
+  "今年1-5月各平台订单数和销售额"
+];
 
 const nav = [
+  { key: "smart", label: "智能分析", meta: "NATURAL LANGUAGE SQL", icon: Sparkles, permission: "analytics" },
   { key: "dashboard", label: "经营看板", meta: "EXECUTIVE OVERVIEW", icon: LayoutDashboard, permission: "view" },
   { key: "orders", label: "订单明细", meta: "ORDER LEDGER", icon: ShoppingBag, permission: "view" },
   { key: "imports", label: "数据导入", meta: "IMPORT CONTROL", icon: FileSpreadsheet, permission: "import" },
@@ -328,6 +401,20 @@ const currentNav = computed(() => nav.find((item) => item.key === view.value));
 const usesFilters = computed(() => ["dashboard", "orders", "products", "shops"].includes(view.value));
 const maxCategoryRevenue = computed(() => Math.max(...products.category_rows.map((row) => Number(row.revenue || 0)), 1));
 const maxProductRevenue = computed(() => Math.max(...products.rows.slice(0, 10).map((row) => Number(row.revenue || 0)), 1));
+const smartColumns = computed(() => smart.result?.rows?.length ? Object.keys(smart.result.rows[0]) : []);
+const smartMaxValue = computed(() => Math.max(...(smart.result?.chart?.points || []).map((point) => Number(point.value || 0)), 1));
+const smartPieStyle = computed(() => {
+  const colors = ["#6bf8e0", "#8dff93", "#ffcb6b", "#b78cff", "#ff6b6b", "#7bc9ff", "#d6ff6b", "#ffa66b", "#f48cff", "#9fb4ff", "#66e2a6", "#ffd36b"];
+  const points = smart.result?.chart?.points || [];
+  let cursor = 0;
+  const segments = points.map((point, index) => {
+    const next = cursor + Math.max(0, Number(point.value || 0));
+    const segment = `${colors[index % colors.length]} ${cursor}% ${next}%`;
+    cursor = next;
+    return segment;
+  });
+  return { background: `conic-gradient(${segments.join(", ") || "#203235 0% 100%"})` };
+});
 const presets = [
   ["last7", "近7天"], ["last30", "近30天"], ["lastWeek", "上周"], ["thisMonth", "本月"], ["lastMonth", "上月"],
   ["quarter", "本季度"], ["firstHalf", "上半年"], ["secondHalf", "下半年"], ["lastYear", "近一年"], ["thisYear", "今年"]
@@ -425,6 +512,68 @@ function delayedLoad() {
 
 function barWidth(value, max) {
   return `${Math.max(2, Math.min(100, Number(value || 0) / max * 100))}%`;
+}
+
+function smartBarWidth(value) {
+  return `${Math.max(2, Math.min(100, Number(value || 0) / smartMaxValue.value * 100))}%`;
+}
+
+function smartColumnLabel(key) {
+  const labels = {
+    month: "月份",
+    category: "产品大类",
+    product_no: "货号",
+    product_name: "产品",
+    platform: "平台",
+    shop_name: "店铺",
+    dept: "部门",
+    customer_no: "客户编号",
+    customer_name: "客户",
+    province: "省份",
+    city: "城市",
+    order_source: "订单来源",
+    revenue: "销售额",
+    qty: "销量",
+    profit: "利润",
+    cost: "成本",
+    orders: "订单数",
+    profit_rate: "利润率",
+    revenue_share_pct: "销售额占比"
+  };
+  return labels[key] || key;
+}
+
+function formatSmartValue(value, key) {
+  if (key === "revenue_share_pct" || key === "profit_rate") return `${Number(value || 0).toFixed(2)}%`;
+  return Money(value);
+}
+
+function formatSmartCell(value, key) {
+  if (value === null || value === undefined || value === "") return "-";
+  if (["revenue", "qty", "profit", "cost", "orders", "profit_rate", "revenue_share_pct"].includes(key)) {
+    return formatSmartValue(value, key);
+  }
+  return value;
+}
+
+async function askSmart() {
+  smart.error = "";
+  if (!smart.question.trim()) {
+    smart.error = "请输入要分析的问题";
+    return;
+  }
+  smart.busy = true;
+  try {
+    smart.result = await api("/api/analytics/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question: smart.question })
+    });
+  } catch (err) {
+    smart.error = err.message;
+  } finally {
+    smart.busy = false;
+  }
 }
 
 async function openView(key) {
