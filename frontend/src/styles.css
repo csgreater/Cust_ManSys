@@ -232,6 +232,60 @@ td em { display: inline-block; padding: 4px 8px; border-radius: 999px; backgroun
 .matrix-values b { color: var(--text); }
 .matrix-values em { color: var(--cyan); font-style: normal; font-weight: 900; }
 
+.commerce-board { display: grid; gap: 18px; }
+.commerce-toolbar {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto auto;
+  gap: 14px;
+  align-items: center;
+  padding: 16px;
+  border: 1px solid var(--line);
+  background: rgba(8, 15, 17, .76);
+  box-shadow: var(--shadow);
+}
+.commerce-toolbar h2 { margin: 0; }
+.switch-group { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+.switch-group button {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(107, 248, 224, .06);
+  color: var(--muted);
+  padding: 6px 11px;
+  font-weight: 900;
+}
+.switch-group button.active,
+.switch-group button:hover {
+  border-color: var(--line-strong);
+  color: #051011;
+  background: linear-gradient(135deg, var(--cyan), var(--green));
+}
+.commerce-metrics strong.loss,
+td.loss { color: var(--red); }
+.trend-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+  gap: 12px;
+  min-height: 280px;
+  padding: 18px;
+  align-items: end;
+}
+.trend-strip article { display: grid; grid-template-rows: auto 160px auto auto; gap: 8px; min-width: 0; }
+.trend-strip span,
+.trend-strip small { color: var(--muted); font-size: 12px; font-weight: 850; }
+.trend-strip div { display: flex; align-items: end; overflow: hidden; border-radius: 999px 999px 4px 4px; background: rgba(127,155,155,.18); }
+.trend-strip i { display: block; width: 100%; min-height: 6px; border-radius: inherit; background: linear-gradient(180deg, var(--green), var(--cyan)); }
+.trend-strip b { color: var(--green); font-size: 12px; }
+.commerce-rank { display: grid; gap: 13px; padding: 18px; max-height: 420px; overflow: auto; }
+.commerce-rank article { display: grid; grid-template-columns: minmax(150px, 230px) minmax(160px, 1fr) 110px; gap: 14px; align-items: center; }
+.commerce-rank strong,
+.commerce-rank small { display: block; }
+.commerce-rank small { color: var(--muted); margin-top: 3px; font-size: 12px; }
+.commerce-rank span { overflow: hidden; height: 14px; border-radius: 999px; background: rgba(127,155,155,.18); }
+.commerce-rank i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--cyan), var(--green)); }
+.commerce-rank i.negative { background: linear-gradient(90deg, var(--red), var(--amber)); }
+.commerce-rank b { color: var(--green); text-align: right; }
+
 .smart-layout { display: grid; gap: 18px; }
 .smart-query-body { display: grid; gap: 14px; padding: 18px; }
 textarea {
@@ -254,6 +308,7 @@ textarea:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(107, 248,
 .smart-bar span { overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
 .smart-bar div { overflow: hidden; height: 14px; border-radius: 999px; background: rgba(127,155,155,.18); }
 .smart-bar i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--cyan), var(--green)); }
+.smart-bar i.negative { background: linear-gradient(90deg, var(--red), var(--amber)); }
 .smart-bar b { color: var(--green); text-align: right; }
 .smart-pie-wrap { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 22px; align-items: center; padding: 22px; }
 .smart-pie { width: 220px; aspect-ratio: 1; border-radius: 50%; border: 1px solid var(--line-strong); box-shadow: var(--glow); }
@@ -318,8 +373,10 @@ textarea:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(107, 248,
   .metric-grid, .filter-suite { grid-template-columns: 1fr; }
   .range-pop { min-width: 0; width: calc(100vw - 36px); grid-template-columns: 1fr; }
   .range-custom { grid-template-columns: 1fr; }
-  .exec-bar-row, .profit-matrix article { grid-template-columns: 1fr; }
+  .exec-bar-row, .profit-matrix article, .commerce-toolbar, .commerce-rank article { grid-template-columns: 1fr; }
   .smart-bar, .smart-pie-wrap { grid-template-columns: 1fr; }
   .exec-value, .matrix-values { text-align: left; }
+  .switch-group { justify-content: flex-start; }
+  .commerce-rank b { text-align: left; }
   .smart-bar b { text-align: left; }
 }

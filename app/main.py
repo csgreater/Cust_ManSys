@@ -3,8 +3,13 @@ from __future__ import annotations
 import csv
 import gc
 import hashlib
+import hmac
 import json
+import logging
 import tempfile
+import time
+import asyncio
+from collections import defaultdict, deque
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -18,9 +23,10 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import BASE_DIR, settings
+from app.ark_analytics import ark_analytics_enabled, parse_analytics_intent
 from app.db import connection
 from app.import_service import HEADER_MAP, ImportParseResult, iter_excel_rows, new_batch_no, parse_excel
-from app.nl_analytics import build_chart, build_sql, normalize_rows, parse_question_filters, summarize_answer
+from app.nl_analytics import audit_sql_plan, build_chart, build_sql, normalize_rows, parse_question_filters, summarize_answer
 from app.permissions import has_permission, load_user_context, requested_scope_filters, scope_clause
 from app.security import verify_password
 
@@ -43,6 +49,8 @@ templates = Jinja2Templates(directory=BASE_DIR / "app" / "templates")
 UPLOAD_CHUNK_SIZE = 1024 * 1024
 IMPORT_INSERT_CHUNK_SIZE = 1000
 IMPORT_PROGRESS_INTERVAL = 5000
+analytics_logger = logging.getLogger("analytics_api")
+RATE_LIMIT_BUCKETS: dict[str, deque[float]] = defaultdict(deque)
 
 
 LEGACY_HTML_ROUTES = {
@@ -129,6 +137,57 @@ def require_api_user(request: Request, permission: str | None = None) -> dict[st
     return user
 
 
+def load_user_by_username(username: str) -> dict[str, Any] | None:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM t_user WHERE username = %(username)s AND is_active = 1",
+                {"username": username},
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+        return load_user_context(conn, int(row["id"]))
+
+
+def bearer_token(request: Request) -> str:
+    header = request.headers.get("authorization", "")
+    if header.lower().startswith("bearer "):
+        return header[7:].strip()
+    return request.headers.get("x-analytics-token", "").strip()
+
+
+def require_analytics_user(request: Request) -> dict[str, Any]:
+    user = current_user(request)
+    if user:
+        if not has_permission(user, "analytics"):
+            raise HTTPException(status_code=403, detail="没有权限访问该功能")
+        return user
+
+    token = bearer_token(request)
+    if not settings.analytics_api_token or not token or not hmac.compare_digest(token, settings.analytics_api_token):
+        raise HTTPException(status_code=401, detail="未登录或缺少有效分析 API Token")
+
+    service_user = load_user_by_username(settings.analytics_api_username)
+    if not service_user:
+        raise HTTPException(status_code=500, detail="分析 API 服务账号不存在或未启用")
+    if not has_permission(service_user, "analytics"):
+        raise HTTPException(status_code=403, detail="分析 API 服务账号没有 analytics 权限")
+    return service_user
+
+
+def rate_limit_analytics(request: Request, user: dict[str, Any]) -> None:
+    limit = max(1, settings.analytics_rate_limit_per_minute)
+    identity = f"{user.get('username') or 'anonymous'}:{request.client.host if request.client else 'unknown'}"
+    now = time.monotonic()
+    bucket = RATE_LIMIT_BUCKETS[identity]
+    while bucket and now - bucket[0] > 60:
+        bucket.popleft()
+    if len(bucket) >= limit:
+        raise HTTPException(status_code=429, detail=f"分析请求过于频繁，请稍后再试（每分钟最多 {limit} 次）")
+    bucket.append(now)
+
+
 def api_ok(data: Any = None, **extra: Any) -> JSONResponse:
     payload = {"ok": True}
     if data is not None:
@@ -172,6 +231,53 @@ def order_where(user: dict[str, Any], filters: dict[str, Any], alias: str = "o")
     scope_filter, params = requested_scope_filters(params, alias)
     where = " WHERE " + " AND ".join(clauses) + scope_filter + scope_clause(user, params, alias)
     return where, params
+
+
+async def read_json_body(request: Request) -> dict[str, Any]:
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="请求体不是有效 JSON") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象")
+    return body
+
+
+def validate_date_filters(filters: dict[str, Any]) -> None:
+    try:
+        start = datetime.strptime(filters["start_time"], "%Y-%m-%d").date()
+        end = datetime.strptime(filters["end_time"], "%Y-%m-%d").date()
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="日期格式必须是 YYYY-MM-DD") from exc
+    if start > end:
+        raise HTTPException(status_code=400, detail="开始日期不能晚于结束日期")
+    if (end - start).days > 366 * 3:
+        raise HTTPException(status_code=400, detail="单次分析时间范围不能超过 3 年")
+
+
+async def build_analysis_plan(user: dict[str, Any], body: dict[str, Any]) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any]]:
+    question = str(body.get("question") or "").strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="请输入要分析的问题")
+    if len(question) > 500:
+        raise HTTPException(status_code=400, detail="问题长度不能超过 500 字")
+
+    filters = parse_question_filters(question)
+    body_filters = body.get("filters") or {}
+    if not isinstance(body_filters, dict):
+        raise HTTPException(status_code=400, detail="filters 必须是 JSON 对象")
+    filters.update({key: value for key, value in body_filters.items() if key in filters and value})
+    validate_date_filters(filters)
+    where, params = order_where(user, filters)
+    ark_intent = await asyncio.to_thread(parse_analytics_intent, question)
+    plan = build_sql(question, where, params, intent=ark_intent)
+    plan["parser"] = "ark" if ark_intent else "rules"
+    plan["ark_enabled"] = ark_analytics_enabled()
+    try:
+        audit_sql_plan(plan["sql"], params)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"分析 SQL 未通过安全审计：{exc}") from exc
+    return question, filters, params, plan
 
 
 def mask_phone(value: str | None) -> str:
@@ -456,24 +562,169 @@ def api_shops(request: Request):
     return api_ok({"filters": filters, "rows": rows})
 
 
+COMMERCE_DIMENSIONS = {
+    "product": {
+        "label": "产品",
+        "select": "o.product_no AS product_no, o.product_name AS product_name",
+        "group": "o.product_no, o.product_name",
+        "label_sql": "MAX(o.product_name)",
+    },
+    "shop": {
+        "label": "店铺",
+        "select": "o.shop_name AS shop_name",
+        "group": "o.shop_name",
+        "label_sql": "o.shop_name",
+    },
+    "platform": {
+        "label": "平台",
+        "select": "o.platform AS platform",
+        "group": "o.platform",
+        "label_sql": "o.platform",
+    },
+    "category": {
+        "label": "产品大类",
+        "select": "o.category AS category",
+        "group": "o.category",
+        "label_sql": "o.category",
+    },
+    "province": {
+        "label": "省份",
+        "select": "o.province AS province",
+        "group": "o.province",
+        "label_sql": "o.province",
+    },
+}
+COMMERCE_METRICS = {"revenue", "profit", "qty", "orders", "profit_rate"}
+
+
+@app.get("/api/analytics/commerce-dashboard")
+def api_commerce_dashboard(request: Request):
+    user = require_api_user(request, "analytics")
+    filters = default_filters(request)
+    validate_date_filters(filters)
+    dimension_key = request.query_params.get("dimension", "product")
+    metric = request.query_params.get("metric", "revenue")
+    dimension = COMMERCE_DIMENSIONS.get(dimension_key, COMMERCE_DIMENSIONS["product"])
+    if metric not in COMMERCE_METRICS:
+        metric = "revenue"
+    where, params = order_where(user, filters)
+    metric_order = "profit_rate" if metric == "profit_rate" else metric
+
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT
+                  COALESCE(SUM(o.share_receivable), 0) AS revenue,
+                  COALESCE(SUM(o.qty), 0) AS qty,
+                  COALESCE(SUM(o.profit), 0) AS profit,
+                  COUNT(DISTINCT o.order_no) AS orders,
+                  COUNT(DISTINCT o.customer_no) AS customers,
+                  COUNT(DISTINCT o.product_no) AS products,
+                  CASE WHEN COUNT(DISTINCT o.order_no) = 0 THEN 0 ELSE SUM(o.share_receivable) / COUNT(DISTINCT o.order_no) END AS avg_order_value,
+                  CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate
+                FROM t_order_sku_detail o
+                {where}
+                """,
+                params,
+            )
+            summary = cur.fetchone()
+            cur.execute(
+                f"""
+                SELECT DATE_FORMAT(o.ship_time, '%%Y-%%m') AS month,
+                       COALESCE(SUM(o.share_receivable), 0) AS revenue,
+                       COALESCE(SUM(o.qty), 0) AS qty,
+                       COALESCE(SUM(o.profit), 0) AS profit,
+                       COUNT(DISTINCT o.order_no) AS orders,
+                       CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate
+                FROM t_order_sku_detail o
+                {where}
+                GROUP BY DATE_FORMAT(o.ship_time, '%%Y-%%m')
+                ORDER BY month ASC
+                LIMIT 36
+                """,
+                params,
+            )
+            trend_rows = list(cur.fetchall())
+            cur.execute(
+                f"""
+                SELECT {dimension["select"]},
+                       COALESCE(SUM(o.share_receivable), 0) AS revenue,
+                       COALESCE(SUM(o.qty), 0) AS qty,
+                       COALESCE(SUM(o.profit), 0) AS profit,
+                       COUNT(DISTINCT o.order_no) AS orders,
+                       COUNT(DISTINCT o.customer_no) AS customers,
+                       CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate,
+                       CASE WHEN totals.total_revenue = 0 THEN 0 ELSE SUM(o.share_receivable) / totals.total_revenue * 100 END AS revenue_share_pct
+                FROM t_order_sku_detail o
+                CROSS JOIN (
+                  SELECT COALESCE(SUM(o.share_receivable), 0) AS total_revenue
+                  FROM t_order_sku_detail o
+                  {where}
+                ) totals
+                {where}
+                GROUP BY {dimension["group"]}
+                ORDER BY {metric_order} DESC
+                LIMIT 30
+                """,
+                params,
+            )
+            dimension_rows = list(cur.fetchall())
+            cur.execute(
+                f"""
+                SELECT o.product_no, o.product_name, o.shop_name,
+                       COALESCE(SUM(o.share_receivable), 0) AS revenue,
+                       COALESCE(SUM(o.qty), 0) AS qty,
+                       COALESCE(SUM(o.profit), 0) AS profit,
+                       COUNT(DISTINCT o.order_no) AS orders,
+                       CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate
+                FROM t_order_sku_detail o
+                {where}
+                GROUP BY o.product_no, o.product_name, o.shop_name
+                HAVING profit < 0 OR profit_rate < 10
+                ORDER BY profit ASC, revenue DESC
+                LIMIT 20
+                """,
+                params,
+            )
+            risk_rows = list(cur.fetchall())
+
+    return api_ok(
+        {
+            "filters": filters,
+            "dimension": {"key": dimension_key if dimension_key in COMMERCE_DIMENSIONS else "product", "label": dimension["label"]},
+            "metric": metric,
+            "summary": summary,
+            "trend_rows": trend_rows,
+            "dimension_rows": dimension_rows,
+            "risk_rows": risk_rows,
+        }
+    )
+
+
 @app.post("/api/analytics/ask")
 async def api_analytics_ask(request: Request):
-    user = require_api_user(request, "analytics")
-    body = await request.json()
-    question = str(body.get("question") or "").strip()
-    if not question:
-        raise HTTPException(status_code=400, detail="请输入要分析的问题")
-
-    filters = parse_question_filters(question)
-    filters.update({key: value for key, value in (body.get("filters") or {}).items() if key in filters and value})
-    where, params = order_where(user, filters)
-    plan = build_sql(question, where, params)
+    user = require_analytics_user(request)
+    rate_limit_analytics(request, user)
+    body = await read_json_body(request)
+    question, filters, params, plan = await build_analysis_plan(user, body)
+    started = time.perf_counter()
     with connection() as conn:
         with conn.cursor() as cur:
             cur.execute(plan["sql"], params)
             rows = normalize_rows(list(cur.fetchall()))
     chart = build_chart(question, rows, plan)
     answer = summarize_answer(question, rows, plan)
+    analytics_logger.info(
+        "analytics ask user=%s rows=%s elapsed_ms=%.1f parser=%s dimensions=%s metrics=%s question=%r",
+        user.get("username"),
+        len(rows),
+        (time.perf_counter() - started) * 1000,
+        plan["parser"],
+        ",".join(plan["dimensions"]),
+        ",".join(plan["metrics"]),
+        question,
+    )
     return api_ok(
         {
             "question": question,
@@ -483,8 +734,40 @@ async def api_analytics_ask(request: Request):
             "sql_params": plan["params"],
             "dimensions": plan["dimensions"],
             "metrics": plan["metrics"],
+            "parser": plan["parser"],
+            "ark_enabled": plan["ark_enabled"],
             "rows": rows,
             "chart": chart,
+        }
+    )
+
+
+@app.post("/api/analytics/parse")
+async def api_analytics_parse(request: Request):
+    user = require_analytics_user(request)
+    rate_limit_analytics(request, user)
+    body = await read_json_body(request)
+    question, filters, _params, plan = await build_analysis_plan(user, body)
+    analytics_logger.info(
+        "analytics parse user=%s parser=%s dimensions=%s metrics=%s question=%r",
+        user.get("username"),
+        plan["parser"],
+        ",".join(plan["dimensions"]),
+        ",".join(plan["metrics"]),
+        question,
+    )
+    return api_ok(
+        {
+            "question": question,
+            "filters": filters,
+            "sql": plan["sql"].replace("%%", "%"),
+            "sql_params": plan["params"],
+            "dimensions": plan["dimensions"],
+            "metrics": plan["metrics"],
+            "order_metric": plan["order_metric"],
+            "wants_share": plan["wants_share"],
+            "parser": plan["parser"],
+            "ark_enabled": plan["ark_enabled"],
         }
     )
 

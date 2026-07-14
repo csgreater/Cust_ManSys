@@ -61,6 +61,19 @@ METRICS: dict[str, Metric] = {
 
 DEFAULT_METRICS = ["revenue", "qty", "profit", "profit_rate", "orders"]
 FILTER_KEYS = ("start_time", "end_time", "dept", "platform", "shop_name", "category", "product", "order_no")
+FORBIDDEN_SQL_TOKENS = (
+    " insert ",
+    " update ",
+    " delete ",
+    " drop ",
+    " alter ",
+    " truncate ",
+    " create ",
+    " replace ",
+    " grant ",
+    " revoke ",
+    " call ",
+)
 
 
 def default_analysis_filters(today: date | None = None) -> dict[str, Any]:
@@ -216,9 +229,50 @@ def detect_metrics(question: str) -> tuple[list[str], str, bool]:
     return unique_metrics[:5], order_metric, wants_share
 
 
-def build_sql(question: str, where: str, params: dict[str, Any]) -> dict[str, Any]:
-    dimensions = detect_dimensions(question)
-    metrics, order_metric, wants_share = detect_metrics(question)
+def normalize_analysis_intent(intent: dict[str, Any]) -> dict[str, Any] | None:
+    raw_dimensions = intent.get("dimensions")
+    raw_metrics = intent.get("metrics")
+    if not isinstance(raw_dimensions, list) or not isinstance(raw_metrics, list):
+        return None
+
+    dimensions = unique_allowed(raw_dimensions, DIMENSIONS, 3)
+    metrics = unique_allowed(raw_metrics, METRICS, 5)
+    order_metric = intent.get("order_metric")
+    if not isinstance(order_metric, str) or order_metric not in METRICS:
+        order_metric = metrics[0] if metrics else "revenue"
+    wants_share = intent.get("wants_share") is True
+    if wants_share and "revenue" not in metrics:
+        metrics.insert(0, "revenue")
+    if not dimensions or not metrics:
+        return None
+    return {
+        "dimensions": dimensions,
+        "metrics": metrics,
+        "order_metric": order_metric,
+        "wants_share": wants_share,
+    }
+
+
+def unique_allowed(values: list[Any], allowed: dict[str, Any], limit: int) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        if isinstance(value, str) and value in allowed and value not in result:
+            result.append(value)
+        if len(result) == limit:
+            break
+    return result
+
+
+def build_sql(question: str, where: str, params: dict[str, Any], intent: dict[str, Any] | None = None) -> dict[str, Any]:
+    normalized_intent = normalize_analysis_intent(intent) if intent else None
+    if normalized_intent:
+        dimensions = normalized_intent["dimensions"]
+        metrics = normalized_intent["metrics"]
+        order_metric = normalized_intent["order_metric"]
+        wants_share = normalized_intent["wants_share"]
+    else:
+        dimensions = detect_dimensions(question)
+        metrics, order_metric, wants_share = detect_metrics(question)
     if order_metric not in metrics and order_metric in METRICS:
         metrics.insert(0, order_metric)
 
@@ -349,3 +403,23 @@ def to_float(value: Any) -> float:
 
 def normalize_sql(sql: str) -> str:
     return "\n".join(line.rstrip() for line in sql.strip().splitlines())
+
+
+def audit_sql_plan(sql: str, params: dict[str, Any]) -> None:
+    normalized = re.sub(r"\s+", " ", sql).strip().lower()
+    compact = f" {normalized} "
+    if not compact.strip().startswith("select "):
+        raise ValueError("analytics SQL must be a SELECT")
+    if ";" in compact or "--" in compact or "/*" in compact or "*/" in compact:
+        raise ValueError("analytics SQL must be a single statement without comments")
+    if " from t_order_sku_detail o " not in compact:
+        raise ValueError("analytics SQL must read from t_order_sku_detail")
+    if any(token in compact for token in FORBIDDEN_SQL_TOKENS):
+        raise ValueError("analytics SQL contains a forbidden statement")
+    if "%(start_time)s" not in sql or "%(end_time_exclusive)s" not in sql:
+        raise ValueError("analytics SQL must include a ship_time range")
+    if "start_time" not in params or "end_time_exclusive" not in params:
+        raise ValueError("analytics SQL is missing time parameters")
+    limit_match = re.search(r"\blimit\s+(\d+)\s*$", compact)
+    if not limit_match or int(limit_match.group(1)) > 200:
+        raise ValueError("analytics SQL must end with LIMIT <= 200")

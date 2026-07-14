@@ -12,6 +12,20 @@ DATABASE_URL=mysql+pymysql://order_app:your_password@127.0.0.1:3306/order_manage
 APP_SECRET_KEY=change-this-secret-key-at-least-32-chars
 ```
 
+### 智能分析（可选）
+
+如需启用火山方舟 Coding Plan 的 OpenAI 兼容解析，在服务器 `.env` 中填写：
+
+```ini
+ARK_ANALYTICS_ENABLED=true
+ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/coding/v3
+ARK_API_KEY=由用户填写
+ARK_MODEL=由用户填写
+ARK_TIMEOUT_SECONDS=20
+```
+
+系统只把分析问题发送给模型；订单明细、客户数据和生成 SQL 都保留在本地。Key 或模型未配置、或 Ark 请求失败时，系统自动回退到内置规则解析。
+
 线上部署时请设置 `APP_ENV=production`、`APP_SECURE_COOKIES=true`，并替换所有默认密码。完整宝塔部署流程见 `docs/deploy-baota.md`。
 
 ## 2. 初始化数据库

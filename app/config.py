@@ -55,6 +55,14 @@ class Settings:
     db_connect_timeout: int = env_int("DB_CONNECT_TIMEOUT", 10)
     db_read_timeout: int = env_int("DB_READ_TIMEOUT", 600)
     db_write_timeout: int = env_int("DB_WRITE_TIMEOUT", 600)
+    analytics_api_token: str = os.getenv("ANALYTICS_API_TOKEN", "")
+    analytics_api_username: str = os.getenv("ANALYTICS_API_USERNAME", "analyst")
+    analytics_rate_limit_per_minute: int = env_int("ANALYTICS_RATE_LIMIT_PER_MINUTE", 30)
+    ark_analytics_enabled: bool = env_bool("ARK_ANALYTICS_ENABLED", False)
+    ark_base_url: str = os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/coding/v3").rstrip("/")
+    ark_api_key: str = os.getenv("ARK_API_KEY", "")
+    ark_model: str = os.getenv("ARK_MODEL", "")
+    ark_timeout_seconds: int = env_int("ARK_TIMEOUT_SECONDS", 20)
     admin_password: str = os.getenv("ADMIN_PASSWORD", "admin123")
     importer_password: str = os.getenv("IMPORTER_PASSWORD", "importer123")
     analyst_password: str = os.getenv("ANALYST_PASSWORD", "analyst123")
@@ -90,6 +98,15 @@ class Settings:
                 problems.append(f"{key} must be changed before production startup")
         if self.secure_cookies is not True:
             problems.append("APP_SECURE_COOKIES=true is required when APP_ENV=production")
+        if self.analytics_api_token and len(self.analytics_api_token) < 24:
+            problems.append("ANALYTICS_API_TOKEN must be at least 24 characters when enabled")
+        if self.ark_analytics_enabled:
+            if not self.ark_api_key:
+                problems.append("ARK_API_KEY is required when ARK_ANALYTICS_ENABLED=true")
+            if not self.ark_model:
+                problems.append("ARK_MODEL is required when ARK_ANALYTICS_ENABLED=true")
+            if not self.ark_base_url.startswith("https://"):
+                problems.append("ARK_BASE_URL must use HTTPS")
 
         if problems:
             joined = "; ".join(problems)

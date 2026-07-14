@@ -51,7 +51,7 @@
           </div>
         </header>
 
-        <section v-if="['dashboard', 'orders', 'products', 'shops'].includes(view)" class="filter-suite">
+        <section v-if="['dashboard', 'commerce', 'orders', 'products', 'shops'].includes(view)" class="filter-suite">
           <div class="range-control">
             <span>订单日期</span>
             <button type="button" @click="rangeOpen = !rangeOpen">{{ filters.start_time }} 至 {{ filters.end_time }}</button>
@@ -68,14 +68,82 @@
           <label>部门<input v-model="filters.dept" @input="delayedLoad" @change="loadCurrent" placeholder="全部" /></label>
           <label>平台<input v-model="filters.platform" @input="delayedLoad" @change="loadCurrent" placeholder="全部" /></label>
           <label>店铺<input v-model="filters.shop_name" @input="delayedLoad" @change="loadCurrent" placeholder="全部" /></label>
-          <label v-if="view === 'products'">大类<input v-model="filters.category" @input="delayedLoad" @change="loadCurrent" placeholder="全部" /></label>
-          <label v-if="['orders','products'].includes(view)">产品/SKU<input v-model="filters.product" @input="delayedLoad" @change="loadCurrent" placeholder="名称、货号、SKU" /></label>
+          <label v-if="['commerce','products'].includes(view)">大类<input v-model="filters.category" @input="delayedLoad" @change="loadCurrent" placeholder="全部" /></label>
+          <label v-if="['commerce','orders','products'].includes(view)">产品/SKU<input v-model="filters.product" @input="delayedLoad" @change="loadCurrent" placeholder="名称、货号、SKU" /></label>
           <label v-if="view === 'orders'">订单号<input v-model="filters.order_no" @input="delayedLoad" @change="loadCurrent" placeholder="订单编号" /></label>
         </section>
 
         <section v-if="loading" class="loading-panel">正在载入数据...</section>
 
         <template v-else>
+          <section v-if="view === 'commerce'" class="commerce-board">
+            <section class="commerce-toolbar">
+              <div>
+                <p class="kicker">ECOMMERCE OPERATIONS</p>
+                <h2>电商经营驾驶舱</h2>
+              </div>
+              <div class="switch-group">
+                <button v-for="item in commerceDimensions" :key="item.key" :class="{ active: commerce.dimension === item.key }" @click="setCommerceDimension(item.key)">{{ item.label }}</button>
+              </div>
+              <div class="switch-group">
+                <button v-for="item in commerceMetrics" :key="item.key" :class="{ active: commerce.metric === item.key }" @click="setCommerceMetric(item.key)">{{ item.label }}</button>
+              </div>
+            </section>
+
+            <section class="metric-grid commerce-metrics">
+              <article><span>销售额</span><strong>{{ Money(commerce.summary.revenue) }}</strong></article>
+              <article><span>利润</span><strong :class="{ loss: Number(commerce.summary.profit || 0) < 0 }">{{ Money(commerce.summary.profit) }}</strong></article>
+              <article><span>利润率</span><strong>{{ Money(commerce.summary.profit_rate) }}%</strong></article>
+              <article><span>订单数</span><strong>{{ commerce.summary.orders || 0 }}</strong></article>
+              <article><span>客单价</span><strong>{{ Money(commerce.summary.avg_order_value) }}</strong></article>
+            </section>
+
+            <section class="chart-grid">
+              <div class="panel">
+                <div class="panel-title"><h2>月度经营趋势</h2><span>销售额 / 利润 / 订单</span></div>
+                <div class="trend-strip">
+                  <article v-for="row in commerce.trend_rows" :key="row.month">
+                    <span>{{ row.month }}</span>
+                    <div><i :style="{ height: commerceTrendHeight(row.revenue) }"></i></div>
+                    <b>{{ Money(row.revenue) }}</b>
+                    <small>利润 {{ Money(row.profit) }} / {{ row.orders || 0 }} 单</small>
+                  </article>
+                  <div v-if="!commerce.trend_rows.length" class="empty-state">暂无趋势数据</div>
+                </div>
+              </div>
+              <div class="panel">
+                <div class="panel-title"><h2>{{ currentCommerceDimension.label }}排行</h2><span>按{{ currentCommerceMetric.label }}排序</span></div>
+                <div class="commerce-rank">
+                  <article v-for="row in commerce.dimension_rows.slice(0, 12)" :key="commerceRowLabel(row)">
+                    <div><strong>{{ commerceRowLabel(row) }}</strong><small>占比 {{ Money(row.revenue_share_pct) }}% / {{ row.orders || 0 }} 单</small></div>
+                    <span><i :class="{ negative: Number(row[commerce.metric] || 0) < 0 }" :style="{ width: commerceRankWidth(row[commerce.metric]) }"></i></span>
+                    <b>{{ formatSmartValue(row[commerce.metric], commerce.metric) }}</b>
+                  </article>
+                  <div v-if="!commerce.dimension_rows.length" class="empty-state">暂无排行数据</div>
+                </div>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-title"><h2>低利润风险清单</h2><span>亏损或利润率低于 10%</span></div>
+              <table>
+                <thead><tr><th>产品</th><th>店铺</th><th>销售额</th><th>销量</th><th>利润</th><th>利润率</th><th>订单数</th></tr></thead>
+                <tbody>
+                  <tr v-for="row in commerce.risk_rows" :key="row.product_no + row.shop_name">
+                    <td><b>{{ row.product_name }}</b><small>{{ row.product_no }}</small></td>
+                    <td>{{ row.shop_name }}</td>
+                    <td>{{ Money(row.revenue) }}</td>
+                    <td>{{ Money(row.qty) }}</td>
+                    <td :class="{ loss: Number(row.profit || 0) < 0 }">{{ Money(row.profit) }}</td>
+                    <td>{{ Money(row.profit_rate) }}%</td>
+                    <td>{{ row.orders || 0 }}</td>
+                  </tr>
+                  <tr v-if="!commerce.risk_rows.length"><td colspan="7">暂无低利润风险项</td></tr>
+                </tbody>
+              </table>
+            </section>
+          </section>
+
           <section v-if="view === 'smart'" class="smart-layout">
             <section class="panel smart-query">
               <div class="panel-title"><h2>自然语言分析</h2><span>生成受控 SQL 并返回图表</span></div>
@@ -90,7 +158,7 @@
             </section>
 
             <section v-if="smart.result" class="panel smart-answer">
-              <div class="panel-title"><h2>分析结论</h2><span>{{ smart.result.filters.start_time }} 至 {{ smart.result.filters.end_time }}</span></div>
+              <div class="panel-title"><h2>分析结论</h2><span>{{ smart.result.parser === "ark" ? "Ark 解析" : "规则解析" }} / {{ smart.result.filters.start_time }} 至 {{ smart.result.filters.end_time }}</span></div>
               <div class="smart-summary">{{ smart.result.answer }}</div>
             </section>
 
@@ -106,7 +174,7 @@
                 <div v-else class="smart-bars">
                   <div v-for="point in smart.result.chart.points" :key="point.label" class="smart-bar">
                     <span>{{ point.label }}</span>
-                    <div><i :style="{ width: smartBarWidth(point.value) }"></i></div>
+                    <div><i :class="{ negative: Number(point.value || 0) < 0 }" :style="{ width: smartBarWidth(point.value) }"></i></div>
                     <b>{{ formatSmartValue(point.value, smart.result.chart.metric) }}</b>
                   </div>
                 </div>
@@ -343,6 +411,7 @@ function MaskAddress(value) {
 }
 const lastMonthStart = addMonths(startOfMonth(today), -1);
 const lastMonthEnd = addDays(startOfMonth(today), -1);
+const currentYearStart = new Date(today.getFullYear(), 0, 1);
 
 const view = ref("dashboard");
 const loading = ref(false);
@@ -356,8 +425,8 @@ let filterTimer = null;
 const me = reactive({ authenticated: false, permissions: [], role_codes: [] });
 const loginForm = reactive({ username: "admin", password: "" });
 const filters = reactive({
-  start_time: fmt(lastMonthStart),
-  end_time: fmt(lastMonthEnd),
+  start_time: fmt(currentYearStart),
+  end_time: fmt(today),
   dept: "",
   platform: "",
   shop_name: "",
@@ -367,6 +436,7 @@ const filters = reactive({
 });
 
 const dashboard = reactive({ summary: {}, top_products: [] });
+const commerce = reactive({ summary: {}, trend_rows: [], dimension_rows: [], risk_rows: [], dimension: "product", metric: "revenue" });
 const orders = reactive({ rows: [] });
 const imports = reactive({ logs: [] });
 const importDetail = ref(null);
@@ -385,8 +455,23 @@ const smartExamples = [
   "今年1-5月按月销售额趋势",
   "今年1-5月各平台订单数和销售额"
 ];
+const commerceDimensions = [
+  { key: "product", label: "产品" },
+  { key: "shop", label: "店铺" },
+  { key: "platform", label: "平台" },
+  { key: "category", label: "大类" },
+  { key: "province", label: "省份" }
+];
+const commerceMetrics = [
+  { key: "revenue", label: "销售额" },
+  { key: "profit", label: "利润" },
+  { key: "qty", label: "销量" },
+  { key: "orders", label: "订单数" },
+  { key: "profit_rate", label: "利润率" }
+];
 
 const nav = [
+  { key: "commerce", label: "经营驾驶舱", meta: "ECOMMERCE COMMAND", icon: BarChart3, permission: "analytics" },
   { key: "smart", label: "智能分析", meta: "NATURAL LANGUAGE SQL", icon: Sparkles, permission: "analytics" },
   { key: "dashboard", label: "经营看板", meta: "EXECUTIVE OVERVIEW", icon: LayoutDashboard, permission: "view" },
   { key: "orders", label: "订单明细", meta: "ORDER LEDGER", icon: ShoppingBag, permission: "view" },
@@ -398,11 +483,15 @@ const nav = [
 const can = (permission) => me.permissions?.includes("admin") || me.permissions?.includes(permission);
 const visibleNav = computed(() => nav.filter((item) => can(item.permission)));
 const currentNav = computed(() => nav.find((item) => item.key === view.value));
-const usesFilters = computed(() => ["dashboard", "orders", "products", "shops"].includes(view.value));
+const usesFilters = computed(() => ["dashboard", "commerce", "orders", "products", "shops"].includes(view.value));
 const maxCategoryRevenue = computed(() => Math.max(...products.category_rows.map((row) => Number(row.revenue || 0)), 1));
 const maxProductRevenue = computed(() => Math.max(...products.rows.slice(0, 10).map((row) => Number(row.revenue || 0)), 1));
+const maxCommerceTrendRevenue = computed(() => Math.max(...commerce.trend_rows.map((row) => Number(row.revenue || 0)), 1));
+const maxCommerceRankValue = computed(() => Math.max(...commerce.dimension_rows.map((row) => Math.abs(Number(row[commerce.metric] || 0))), 1));
+const currentCommerceDimension = computed(() => commerceDimensions.find((item) => item.key === commerce.dimension) || commerceDimensions[0]);
+const currentCommerceMetric = computed(() => commerceMetrics.find((item) => item.key === commerce.metric) || commerceMetrics[0]);
 const smartColumns = computed(() => smart.result?.rows?.length ? Object.keys(smart.result.rows[0]) : []);
-const smartMaxValue = computed(() => Math.max(...(smart.result?.chart?.points || []).map((point) => Number(point.value || 0)), 1));
+const smartMaxValue = computed(() => Math.max(...(smart.result?.chart?.points || []).map((point) => Math.abs(Number(point.value || 0))), 1));
 const smartPieStyle = computed(() => {
   const colors = ["#6bf8e0", "#8dff93", "#ffcb6b", "#b78cff", "#ff6b6b", "#7bc9ff", "#d6ff6b", "#ffa66b", "#f48cff", "#9fb4ff", "#66e2a6", "#ffd36b"];
   const points = smart.result?.chart?.points || [];
@@ -422,6 +511,13 @@ const presets = [
 
 function query() {
   return new URLSearchParams(Object.fromEntries(Object.entries(filters).filter(([, v]) => v))).toString();
+}
+
+function commerceQuery() {
+  const params = new URLSearchParams(query());
+  params.set("dimension", commerce.dimension);
+  params.set("metric", commerce.metric);
+  return params.toString();
 }
 
 async function api(path, options = {}) {
@@ -461,6 +557,13 @@ async function loadCurrent() {
   loading.value = true;
   try {
     if (view.value === "dashboard") Object.assign(dashboard, await api(`/api/dashboard?${query()}`));
+    if (view.value === "commerce") {
+      const data = await api(`/api/analytics/commerce-dashboard?${commerceQuery()}`);
+      commerce.summary = data.summary || {};
+      commerce.trend_rows = data.trend_rows || [];
+      commerce.dimension_rows = data.dimension_rows || [];
+      commerce.risk_rows = data.risk_rows || [];
+    }
     if (view.value === "orders") Object.assign(orders, await api(`/api/orders?${query()}`));
     if (view.value === "imports") Object.assign(imports, await api("/api/imports"));
     if (view.value === "products") Object.assign(products, await api(`/api/analytics/products?${query()}`));
@@ -515,7 +618,29 @@ function barWidth(value, max) {
 }
 
 function smartBarWidth(value) {
-  return `${Math.max(2, Math.min(100, Number(value || 0) / smartMaxValue.value * 100))}%`;
+  return `${Math.max(2, Math.min(100, Math.abs(Number(value || 0)) / smartMaxValue.value * 100))}%`;
+}
+
+function commerceTrendHeight(value) {
+  return `${Math.max(6, Math.min(100, Number(value || 0) / maxCommerceTrendRevenue.value * 100))}%`;
+}
+
+function commerceRankWidth(value) {
+  return `${Math.max(2, Math.min(100, Math.abs(Number(value || 0)) / maxCommerceRankValue.value * 100))}%`;
+}
+
+function commerceRowLabel(row) {
+  return row.product_name || row.shop_name || row.platform || row.category || row.province || "未分类";
+}
+
+async function setCommerceDimension(key) {
+  commerce.dimension = key;
+  await loadCurrent();
+}
+
+async function setCommerceMetric(key) {
+  commerce.metric = key;
+  await loadCurrent();
 }
 
 function smartColumnLabel(key) {
