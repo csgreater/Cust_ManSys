@@ -25,6 +25,12 @@ class Metric:
 DIMENSIONS: dict[str, Dimension] = {
     "month": Dimension("month", "月份", "DATE_FORMAT(o.ship_time, '%%Y-%%m') AS month", "DATE_FORMAT(o.ship_time, '%%Y-%%m')"),
     "category": Dimension("category", "产品大类", "o.category AS category", "o.category"),
+    "product_classification": Dimension(
+        "product_classification",
+        "货品分类",
+        "o.product_classification AS product_classification",
+        "o.product_classification",
+    ),
     "product": Dimension(
         "product",
         "产品",
@@ -60,7 +66,7 @@ METRICS: dict[str, Metric] = {
 }
 
 DEFAULT_METRICS = ["revenue", "qty", "profit", "profit_rate", "orders"]
-FILTER_KEYS = ("start_time", "end_time", "dept", "platform", "shop_name", "category", "product", "order_no")
+FILTER_KEYS = ("start_time", "end_time", "dept", "platform", "shop_name", "category", "product_classification", "product", "order_no")
 FORBIDDEN_SQL_TOKENS = (
     " insert ",
     " update ",
@@ -85,6 +91,7 @@ def default_analysis_filters(today: date | None = None) -> dict[str, Any]:
         "platform": "",
         "shop_name": "",
         "category": "",
+        "product_classification": "",
         "product": "",
         "order_no": "",
     }
@@ -165,9 +172,11 @@ def detect_dimensions(question: str) -> list[str]:
     dimensions: list[str] = []
     if any(word in text for word in ("趋势", "按月", "每月", "月度", "月份")):
         dimensions.append("month")
-    if any(word in text for word in ("大类", "品类", "分类", "类目")):
+    if "货品分类" in text:
+        dimensions.append("product_classification")
+    if "货品分类" not in text and any(word in text for word in ("大类", "品类", "分类", "类目")):
         dimensions.append("category")
-    if any(word in text for word in ("产品", "商品", "货品", "货号", "sku")):
+    if "货品分类" not in text and any(word in text for word in ("产品", "商品", "货品", "货号", "sku")):
         dimensions.append("product")
     if any(word in text for word in ("平台", "渠道")):
         dimensions.append("platform")

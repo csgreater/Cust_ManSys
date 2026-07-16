@@ -71,6 +71,7 @@ python scripts/migrate_add_order_source_customer_name.py
 python scripts/migrate_profit_formula_warning.py
 python scripts/migrate_optional_order_source_sku.py
 python scripts/migrate_production_indexes.py
+python scripts/migrate_add_product_classification.py
 python scripts/ensure_future_partitions.py
 python scripts/check_db_ready.py
 ```

@@ -69,6 +69,7 @@
           <label>平台<input v-model="filters.platform" @input="delayedLoad" @change="loadCurrent" placeholder="全部" /></label>
           <label>店铺<input v-model="filters.shop_name" @input="delayedLoad" @change="loadCurrent" placeholder="全部" /></label>
           <label v-if="['commerce','products'].includes(view)">大类<input v-model="filters.category" @input="delayedLoad" @change="loadCurrent" placeholder="全部" /></label>
+          <label v-if="['commerce','products'].includes(view)">货品分类<input v-model="filters.product_classification" @input="delayedLoad" @change="loadCurrent" placeholder="全部" /></label>
           <label v-if="['commerce','orders','products'].includes(view)">产品/SKU<input v-model="filters.product" @input="delayedLoad" @change="loadCurrent" placeholder="名称、货号、SKU" /></label>
           <label v-if="view === 'orders'">订单号<input v-model="filters.order_no" @input="delayedLoad" @change="loadCurrent" placeholder="订单编号" /></label>
         </section>
@@ -130,7 +131,7 @@
                 <thead><tr><th>产品</th><th>店铺</th><th>销售额</th><th>销量</th><th>利润</th><th>利润率</th><th>订单数</th></tr></thead>
                 <tbody>
                   <tr v-for="row in commerce.risk_rows" :key="row.product_no + row.shop_name">
-                    <td><b>{{ row.product_name }}</b><small>{{ row.product_no }}</small></td>
+                    <td><b>{{ row.product_name }}</b><small>{{ row.product_classification || "未分类" }} / {{ row.product_no }}</small></td>
                     <td>{{ row.shop_name }}</td>
                     <td>{{ Money(row.revenue) }}</td>
                     <td>{{ Money(row.qty) }}</td>
@@ -214,13 +215,13 @@
             <section class="panel">
               <div class="panel-title"><h2>TOP 产品</h2><span>按销售额排序</span></div>
               <table>
-                <thead><tr><th>产品</th><th>大类</th><th>货号</th><th>销量</th><th>销售额</th><th>利润</th></tr></thead>
+                <thead><tr><th>产品</th><th>大类</th><th>货品分类</th><th>货号</th><th>销量</th><th>销售额</th><th>利润</th></tr></thead>
                 <tbody>
                   <tr v-for="row in dashboard.top_products" :key="row.product_no">
-                    <td>{{ row.product_name }}</td><td>{{ row.category }}</td><td>{{ row.product_no }}</td>
+                    <td>{{ row.product_name }}</td><td>{{ row.category }}</td><td>{{ row.product_classification || "未分类" }}</td><td>{{ row.product_no }}</td>
                     <td>{{ Money(row.qty) }}</td><td>{{ Money(row.revenue) }}</td><td>{{ Money(row.profit) }}</td>
                   </tr>
-                  <tr v-if="!dashboard.top_products?.length"><td colspan="6">暂无数据</td></tr>
+                  <tr v-if="!dashboard.top_products?.length"><td colspan="7">暂无数据</td></tr>
                 </tbody>
               </table>
             </section>
@@ -236,7 +237,7 @@
                     <td><b>{{ row.province }}</b><small>{{ row.city }}<span v-if="row.district"> / {{ row.district }}</span></small></td>
                     <td><b>{{ MaskName(row.receiver_name) }}</b><small>{{ MaskAddress(row.receiver_address) }}</small></td>
                     <td>{{ row.platform }}<small>{{ row.shop_name }}</small></td>
-                    <td><b>{{ row.product_name }}</b><small>{{ row.category }} / {{ row.product_no }}</small></td>
+                    <td><b>{{ row.product_name }}</b><small>{{ row.category }} / {{ row.product_classification || "未分类" }} / {{ row.product_no }}</small></td>
                     <td>{{ Money(row.qty) }}</td><td>{{ Money(row.share_receivable) }}</td><td>{{ Money(row.profit) }}</td>
                   </tr>
                   <tr v-if="!orders.rows?.length"><td colspan="11">暂无数据</td></tr>
@@ -258,6 +259,7 @@
                 <button class="primary" :disabled="importBusy" @click="selectedFile ? uploadFile(selectedFile) : showImportError('请先选择 Excel 文件')">
                   {{ importBusy ? "正在处理..." : "上传并校验" }}
                 </button>
+                <a class="export-btn" href="/api/imports/template"><Download :size="16" /> 下载导入模板</a>
               </div>
               <div class="panel">
                 <div class="panel-title"><h2>导入批次</h2><span>最近 50 条</span></div>
@@ -308,7 +310,7 @@
                 <div class="panel-title"><h2>产品收入与利润</h2><span>多维对比</span></div>
                 <div class="profit-matrix">
                   <article v-for="row in products.rows.slice(0, 10)" :key="row.product_no">
-                    <div><strong>{{ row.product_name }}</strong><small>{{ row.category }} / {{ row.product_no }}</small></div>
+                    <div><strong>{{ row.product_name }}</strong><small>{{ row.category }} / {{ row.product_classification || "未分类" }} / {{ row.product_no }}</small></div>
                     <div class="matrix-bars">
                       <span><i :style="{ width: barWidth(row.revenue, maxProductRevenue) }"></i></span>
                       <span class="profit"><i :class="{ loss: row.profit < 0 }" :style="{ width: barWidth(Math.abs(Number(row.profit || 0)), Math.max(Math.abs(Number(row.revenue || 0)), 1)) }"></i></span>
@@ -322,13 +324,13 @@
             <section class="panel">
               <div class="panel-title"><h2>产品明细排行</h2><span>按销售额排序</span></div>
               <table>
-                <thead><tr><th>大类</th><th>产品</th><th>货号</th><th>销量</th><th>销售额</th><th>成本</th><th>利润</th><th>利润率</th></tr></thead>
+                <thead><tr><th>大类</th><th>货品分类</th><th>产品</th><th>货号</th><th>销量</th><th>销售额</th><th>成本</th><th>利润</th><th>利润率</th></tr></thead>
                 <tbody>
                   <tr v-for="row in products.rows" :key="row.product_no">
-                    <td><em>{{ row.category }}</em></td><td>{{ row.product_name }}</td><td>{{ row.product_no }}</td>
+                    <td><em>{{ row.category }}</em></td><td>{{ row.product_classification || "未分类" }}</td><td>{{ row.product_name }}</td><td>{{ row.product_no }}</td>
                     <td>{{ Money(row.qty) }}</td><td>{{ Money(row.revenue) }}</td><td>{{ Money(row.cost) }}</td><td>{{ Money(row.profit) }}</td><td>{{ Money(row.profit_rate) }}%</td>
                   </tr>
-                  <tr v-if="!products.rows?.length"><td colspan="8">暂无数据</td></tr>
+                  <tr v-if="!products.rows?.length"><td colspan="9">暂无数据</td></tr>
                 </tbody>
               </table>
             </section>
@@ -431,6 +433,7 @@ const filters = reactive({
   platform: "",
   shop_name: "",
   category: "",
+  product_classification: "",
   product: "",
   order_no: ""
 });
@@ -460,6 +463,7 @@ const commerceDimensions = [
   { key: "shop", label: "店铺" },
   { key: "platform", label: "平台" },
   { key: "category", label: "大类" },
+  { key: "product_classification", label: "货品分类" },
   { key: "province", label: "省份" }
 ];
 const commerceMetrics = [
@@ -630,7 +634,7 @@ function commerceRankWidth(value) {
 }
 
 function commerceRowLabel(row) {
-  return row.product_name || row.shop_name || row.platform || row.category || row.province || "未分类";
+  return row.product_name || row.shop_name || row.platform || row.category || row.product_classification || row.province || "未分类";
 }
 
 async function setCommerceDimension(key) {
@@ -647,6 +651,7 @@ function smartColumnLabel(key) {
   const labels = {
     month: "月份",
     category: "产品大类",
+    product_classification: "货品分类",
     product_no: "货号",
     product_name: "产品",
     platform: "平台",

@@ -4,6 +4,7 @@ import csv
 import gc
 import hashlib
 import hmac
+from io import BytesIO
 import json
 import logging
 import tempfile
@@ -21,6 +22,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Red
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
+from openpyxl import Workbook
 
 from app.config import BASE_DIR, settings
 from app.ark_analytics import ark_analytics_enabled, parse_analytics_intent
@@ -205,6 +207,7 @@ def default_filters(request: Request) -> dict[str, Any]:
         "platform": request.query_params.get("platform", ""),
         "shop_name": request.query_params.get("shop_name", ""),
         "category": request.query_params.get("category", ""),
+        "product_classification": request.query_params.get("product_classification", ""),
         "product": request.query_params.get("product", ""),
         "order_no": request.query_params.get("order_no", ""),
     }
@@ -222,6 +225,8 @@ def order_where(user: dict[str, Any], filters: dict[str, Any], alias: str = "o")
     ]
     if filters.get("category"):
         clauses.append(f"{alias}.category = %(category)s")
+    if filters.get("product_classification"):
+        clauses.append(f"{alias}.product_classification = %(product_classification)s")
     if filters.get("product"):
         clauses.append(f"({alias}.product_name LIKE %(product_like)s OR {alias}.product_no LIKE %(product_like)s OR {alias}.sku_id LIKE %(product_like)s)")
         params["product_like"] = f"%{filters['product']}%"
@@ -451,13 +456,13 @@ def api_dashboard(request: Request):
             summary = cur.fetchone()
             cur.execute(
                 f"""
-                SELECT o.product_no, o.product_name, o.category,
+                SELECT o.product_no, o.product_name, o.category, o.product_classification,
                        SUM(o.qty) AS qty,
                        SUM(o.share_receivable) AS revenue,
                        SUM(o.profit) AS profit
                 FROM t_order_sku_detail o
                 {where}
-                GROUP BY o.product_no, o.product_name, o.category
+                GROUP BY o.product_no, o.product_name, o.category, o.product_classification
                 ORDER BY revenue DESC
                 LIMIT 8
                 """,
@@ -500,7 +505,7 @@ def api_products(request: Request):
         with conn.cursor() as cur:
             cur.execute(
                 f"""
-                SELECT o.product_no, o.product_name, o.category,
+                SELECT o.product_no, o.product_name, o.category, o.product_classification,
                        SUM(o.qty) AS qty,
                        SUM(o.share_receivable) AS revenue,
                        SUM(o.cost) AS cost,
@@ -508,7 +513,7 @@ def api_products(request: Request):
                        CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate
                 FROM t_order_sku_detail o
                 {where}
-                GROUP BY o.product_no, o.product_name, o.category
+                GROUP BY o.product_no, o.product_name, o.category, o.product_classification
                 ORDER BY revenue DESC
                 LIMIT 100
                 """,
@@ -586,6 +591,12 @@ COMMERCE_DIMENSIONS = {
         "select": "o.category AS category",
         "group": "o.category",
         "label_sql": "o.category",
+    },
+    "product_classification": {
+        "label": "货品分类",
+        "select": "o.product_classification AS product_classification",
+        "group": "o.product_classification",
+        "label_sql": "o.product_classification",
     },
     "province": {
         "label": "省份",
@@ -672,7 +683,7 @@ def api_commerce_dashboard(request: Request):
             dimension_rows = list(cur.fetchall())
             cur.execute(
                 f"""
-                SELECT o.product_no, o.product_name, o.shop_name,
+                SELECT o.product_no, o.product_name, o.product_classification, o.shop_name,
                        COALESCE(SUM(o.share_receivable), 0) AS revenue,
                        COALESCE(SUM(o.qty), 0) AS qty,
                        COALESCE(SUM(o.profit), 0) AS profit,
@@ -680,7 +691,7 @@ def api_commerce_dashboard(request: Request):
                        CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate
                 FROM t_order_sku_detail o
                 {where}
-                GROUP BY o.product_no, o.product_name, o.shop_name
+                GROUP BY o.product_no, o.product_name, o.product_classification, o.shop_name
                 HAVING profit < 0 OR profit_rate < 10
                 ORDER BY profit ASC, revenue DESC
                 LIMIT 20
@@ -780,6 +791,27 @@ def api_imports(request: Request):
             cur.execute("SELECT * FROM t_import_log ORDER BY import_time DESC LIMIT 50")
             logs = list(cur.fetchall())
     return api_ok({"logs": logs})
+
+
+@app.get("/api/imports/template")
+def api_import_template(request: Request):
+    require_api_user(request, "import")
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "订单导入模板"
+    sheet.append(list(HEADER_MAP.keys()))
+    sheet.freeze_panes = "A2"
+    for column in sheet.columns:
+        sheet.column_dimensions[column[0].column_letter].width = 18
+
+    content = BytesIO()
+    workbook.save(content)
+    content.seek(0)
+    return StreamingResponse(
+        content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=order_import_template.xlsx"},
+    )
 
 
 @app.post("/api/imports/upload")
@@ -912,13 +944,13 @@ def dashboard(request: Request):
             summary = cur.fetchone()
             cur.execute(
                 f"""
-                SELECT o.product_no, o.product_name,
+                SELECT o.product_no, o.product_name, o.product_classification,
                        SUM(o.qty) AS qty,
                        SUM(o.share_receivable) AS revenue,
                        SUM(o.profit) AS profit
                 FROM t_order_sku_detail o
                 {where}
-                GROUP BY o.product_no, o.product_name
+                GROUP BY o.product_no, o.product_name, o.product_classification
                 ORDER BY revenue DESC
                 LIMIT 8
                 """,
@@ -966,7 +998,7 @@ def orders_export(request: Request):
             cur.execute(
                 f"""
                 SELECT order_no, sku_id, order_source, customer_no, customer_name, dept, platform, shop_name,
-                       category, product_name, product_no, unit, qty, share_receivable,
+                       category, product_classification, product_name, product_no, unit, qty, share_receivable,
                        receiver_name, receiver_address, receiver_phone,
                        province, city, district, ship_time, cost, express_fee, logistics_fee,
                        freight, aux_material, share_cost, profit
@@ -1050,6 +1082,7 @@ IMPORT_COLUMNS = [
     "receiver_address",
     "receiver_phone",
     "category",
+    "product_classification",
     "product_name",
     "product_no",
     "unit",
@@ -1373,13 +1406,13 @@ def import_commit(request: Request, batch_no: str):
                 """
                 INSERT INTO t_order_sku_detail (
                   link_id, sku_id, order_source, customer_no, customer_name, dept, platform, shop_name, order_no, original_order_no,
-                  logistics_type, logistics_no, receiver_name, receiver_address, receiver_phone, category, product_name,
+                  logistics_type, logistics_no, receiver_name, receiver_address, receiver_phone, category, product_classification, product_name,
                   product_no, unit, qty, share_receivable, province, city, district, ship_time, cost, express_fee,
                   logistics_fee, freight, aux_material, share_cost
                 )
                 SELECT
                   link_id, sku_id, order_source, customer_no, customer_name, dept, platform, shop_name, order_no, original_order_no,
-                  logistics_type, logistics_no, receiver_name, receiver_address, receiver_phone, category, product_name,
+                  logistics_type, logistics_no, receiver_name, receiver_address, receiver_phone, category, product_classification, product_name,
                   product_no, unit, qty, share_receivable, province, city, district, ship_time, cost, express_fee,
                   logistics_fee, freight, aux_material, share_cost
                 FROM tmp_order_import
@@ -1411,7 +1444,7 @@ def product_analytics(request: Request):
         with conn.cursor() as cur:
             cur.execute(
                 f"""
-                SELECT o.product_no, o.product_name, o.category,
+                SELECT o.product_no, o.product_name, o.category, o.product_classification,
                        SUM(o.qty) AS qty,
                        SUM(o.share_receivable) AS revenue,
                        SUM(o.cost) AS cost,
@@ -1419,7 +1452,7 @@ def product_analytics(request: Request):
                        CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate
                 FROM t_order_sku_detail o
                 {where}
-                GROUP BY o.product_no, o.product_name, o.category
+                GROUP BY o.product_no, o.product_name, o.category, o.product_classification
                 ORDER BY revenue DESC
                 LIMIT 100
                 """,

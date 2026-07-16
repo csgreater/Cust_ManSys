@@ -29,7 +29,7 @@
         <td>{{ row.dept }}</td>
         <td>{{ row.platform }}</td>
         <td>{{ row.shop_name }}</td>
-        <td><strong>{{ row.product_name }}</strong><span class="sub">{{ row.product_no }} / {{ row.sku_id }}</span></td>
+        <td><strong>{{ row.product_name }}</strong><span class="sub">{{ row.category }} / {{ row.product_classification or '未分类' }} / {{ row.product_no }} / {{ row.sku_id }}</span></td>
         <td>{{ "%.2f"|format(row.qty) }}</td>
         <td>{{ "%.2f"|format(row.share_receivable) }}</td>
         <td>{{ "%.2f"|format(row.profit) }}</td>

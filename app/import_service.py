@@ -28,6 +28,7 @@ HEADER_MAP = {
     "地址": "receiver_address",
     "电话": "receiver_phone",
     "大类": "category",
+    "货品分类": "product_classification",
     "货品名称": "product_name",
     "货品编号": "product_no",
     "单位": "unit",
@@ -46,7 +47,8 @@ HEADER_MAP = {
     "利润": "excel_profit",
 }
 
-REQUIRED_HEADERS = list(HEADER_MAP.keys())
+OPTIONAL_HEADERS = {"货品分类"}
+REQUIRED_HEADERS = [header for header in HEADER_MAP if header not in OPTIONAL_HEADERS]
 REQUIRED_FIELDS = {
     "customer_no",
     "dept",
@@ -87,6 +89,7 @@ TEXT_MAX_LENGTHS = {
     "receiver_address": 512,
     "receiver_phone": 32,
     "category": 32,
+    "product_classification": 64,
     "product_name": 255,
     "product_no": 64,
     "unit": 16,
@@ -166,7 +169,11 @@ def header_indexes(headers: list[str]) -> dict[str, int]:
             f"当前识别到：{detected or '空表头'}。"
             f"请使用模板字段：{expected}"
         )
-    return {HEADER_MAP[header]: headers.index(header) for header in REQUIRED_HEADERS}
+    return {
+        HEADER_MAP[header]: headers.index(header)
+        for header in HEADER_MAP
+        if header in headers
+    }
 
 
 def iter_excel_rows(path: Path, batch_no: str) -> Iterator[dict[str, Any]]:
@@ -180,7 +187,11 @@ def iter_excel_rows(path: Path, batch_no: str) -> Iterator[dict[str, Any]]:
         for row_no, values in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
             if not any(value not in (None, "") for value in values):
                 continue
-            item: dict[str, Any] = {"batch_no": batch_no, "row_no": row_no}
+            item: dict[str, Any] = {
+                "batch_no": batch_no,
+                "row_no": row_no,
+                "product_classification": "",
+            }
             errors: list[str] = []
             warnings: list[str] = []
             for field, index in indexes.items():

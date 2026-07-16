@@ -13,6 +13,7 @@
     {% if error %}<div class="alert">{{ error }}</div>{% endif %}
     <input type="file" name="file" accept=".xlsx,.xlsm" required>
     <button type="submit">上传并校验</button>
+    <a href="/api/imports/template">下载导入模板</a>
     <p class="muted">上传后先进入暂存批次，校验无异常后再确认入库。</p>
   </form>
   <section class="panel">

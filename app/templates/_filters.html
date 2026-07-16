@@ -40,6 +40,9 @@
   {% if show_category %}
   <label>大类<input name="category" value="{{ filters.category }}" placeholder="全部"></label>
   {% endif %}
+  {% if show_product_classification %}
+  <label>货品分类<input name="product_classification" value="{{ filters.product_classification }}" placeholder="全部"></label>
+  {% endif %}
   {% if show_product %}
   <label>产品/SKU<input name="product" value="{{ filters.product }}" placeholder="名称、货号、SKU"></label>
   {% endif %}

@@ -34,7 +34,7 @@
         <td>{{ row.platform }}</td>
         <td>{{ row.shop_name }}</td>
         <td>{{ row.receiver_address|address_mask }}</td>
-        <td>{{ row.product_name }}</td>
+        <td>{{ row.category }} / {{ row.product_classification or '未分类' }} / {{ row.product_name }}</td>
         <td>{{ row.ship_time }}</td>
         <td>{{ "%.2f"|format(row.profit) }}</td>
         <td>{{ row.error_message }}</td>

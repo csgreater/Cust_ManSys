@@ -38,6 +38,15 @@ CASES = [
         "share": False,
         "chart": "line",
     },
+    {
+        "question": "今年1-5月各货品分类销售额占比",
+        "start": "2026-01-01",
+        "end": "2026-05-31",
+        "dimensions": ["product_classification"],
+        "metrics": ["revenue"],
+        "share": True,
+        "chart": "pie",
+    },
 ]
 
 

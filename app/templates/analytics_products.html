@@ -8,6 +8,7 @@
   </div>
 </header>
 {% set show_category = true %}
+{% set show_product_classification = true %}
 {% set show_product = true %}
 {% include "_filters.html" with context %}
 
@@ -65,7 +66,7 @@
     <div class="product-bar-row">
       <div class="product-name">
         <strong>{{ row.product_name }}</strong>
-        <span>{{ row.category }} / {{ row.product_no }}</span>
+        <span>{{ row.category }} / {{ row.product_classification or '未分类' }} / {{ row.product_no }}</span>
       </div>
       <div class="dual-bars">
         <div class="bar-track"><span class="bar-fill revenue" style="width: {{ "%.2f"|format(row.revenue_pct) }}%"></span></div>
@@ -88,11 +89,12 @@
     <span>大类、销量、销售额、成本、利润</span>
   </div>
   <table>
-    <thead><tr><th>大类</th><th>货品编号</th><th>产品名称</th><th>销量</th><th>销售额</th><th>成本</th><th>利润</th><th>利润率</th></tr></thead>
+    <thead><tr><th>大类</th><th>货品分类</th><th>货品编号</th><th>产品名称</th><th>销量</th><th>销售额</th><th>成本</th><th>利润</th><th>利润率</th></tr></thead>
     <tbody>
       {% for row in rows %}
       <tr class="{{ 'warn' if row.profit_rate < 5 else '' }}">
         <td><span class="tag">{{ row.category }}</span></td>
+        <td>{{ row.product_classification or '未分类' }}</td>
         <td>{{ row.product_no }}</td>
         <td>{{ row.product_name }}</td>
         <td>{{ "%.2f"|format(row.qty) }}</td>

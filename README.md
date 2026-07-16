@@ -69,6 +69,12 @@ python scripts/migrate_optional_order_source_sku.py
 python scripts/migrate_production_indexes.py
 ```
 
+如果需要在大类与货品名称之间增加可选的 `货品分类` 字段，执行：
+
+```bash
+python scripts/migrate_add_product_classification.py
+```
+
 上线前检查数据库结构、索引、分区和预置账号：
 
 ```bash
@@ -115,5 +121,6 @@ python scripts/create_sample_excel.py
 - 系统通过整批数据指纹防止同一批已入库数据被重复导入。
 - 低配服务器建议每次只处理一个月份；清理历史暂存数据可执行 `python scripts/cleanup_import_staging.py --days 7`。
 - 12 万行左右的月度文件建议设置 `APP_MAX_UPLOAD_MB=200`、`DB_READ_TIMEOUT=600`、`DB_WRITE_TIMEOUT=600`，并同步调整 Nginx 上传限制。
-- 当前 Excel 模板包含 `订单来源`、`客户名称`、`地址`、`省/市/县`，渠道字段映射为：`渠道分类=部门`、`渠道平台=平台`、`销售渠道=店铺`。
+- 当前 Excel 模板包含 `订单来源`、`客户名称`、`地址`、`省/市/县`、`货品分类`，渠道字段映射为：`渠道分类=部门`、`渠道平台=平台`、`销售渠道=店铺`。`货品分类`为可选列，缺失时按未分类处理。
+- 在“数据导入”页面可直接下载与当前校验规则一致的 Excel 模板。
 - 订单明细不提供物理删除功能。
