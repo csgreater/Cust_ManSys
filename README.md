@@ -36,7 +36,7 @@ sample_data/         示例导入文件
 
 ### 1. 配置 Python 与数据库
 
-建议使用 Python 3.10+ 和 MySQL 8.0+。复制并填写环境变量：
+建议使用 Python 3.10+；数据库支持 MySQL 5.7.44+ 和 MySQL 8.0+。复制并填写环境变量：
 
 ```bash
 cp .env.example .env

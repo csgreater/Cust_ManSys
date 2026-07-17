@@ -13,7 +13,7 @@ class NaturalLanguageAnalyticsTests(unittest.TestCase):
         self.assertEqual(order_metric, "profit_rate")
         self.assertFalse(wants_share)
 
-    def test_share_sql_uses_single_scan_window_aggregate(self) -> None:
+    def test_share_sql_is_compatible_with_mysql_57(self) -> None:
         where = "WHERE o.ship_time >= %(start_time)s AND o.ship_time < %(end_time_exclusive)s"
         plan = build_sql(
             "各产品销售额占比",
@@ -21,8 +21,21 @@ class NaturalLanguageAnalyticsTests(unittest.TestCase):
             {"start_time": "2026-01-01", "end_time_exclusive": "2027-01-01"},
         )
 
-        self.assertIn("SUM(SUM(o.share_receivable)) OVER ()", plan["sql"])
+        self.assertNotIn(" OVER ", plan["sql"])
+        self.assertIn("CROSS JOIN", plan["sql"])
+        self.assertIn("MAX(share_totals.total_revenue)", plan["sql"])
+        self.assertEqual(plan["sql"].count(where), 2)
+
+    def test_non_share_sql_skips_total_subquery(self) -> None:
+        where = "WHERE o.ship_time >= %(start_time)s AND o.ship_time < %(end_time_exclusive)s"
+        plan = build_sql(
+            "各产品销售额排行",
+            where,
+            {"start_time": "2026-01-01", "end_time_exclusive": "2027-01-01"},
+        )
+
         self.assertNotIn("CROSS JOIN", plan["sql"])
+        self.assertNotIn("share_totals", plan["sql"])
 
 
 if __name__ == "__main__":

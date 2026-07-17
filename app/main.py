@@ -330,6 +330,14 @@ def percentage_change(current: Any, previous: Any) -> Decimal | None:
     return (current_value - previous_value) / abs(previous_value) * 100
 
 
+def attach_revenue_shares(rows: list[dict[str, Any]], total_revenue: Any) -> None:
+    """Add revenue shares without relying on MySQL 8 window functions."""
+    total = Decimal(total_revenue or 0)
+    for row in rows:
+        revenue = Decimal(row.get("revenue") or 0)
+        row["revenue_share_pct"] = revenue / total * 100 if total else Decimal("0")
+
+
 def mask_sensitive_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for row in rows:
         if "receiver_name" in row:
@@ -663,9 +671,7 @@ def api_dashboard(request: Request):
                 SELECT o.platform,
                        COALESCE(SUM(o.share_receivable), 0) AS revenue,
                        COALESCE(SUM(o.profit), 0) AS profit,
-                       COUNT(DISTINCT o.order_no) AS orders,
-                       CASE WHEN SUM(SUM(o.share_receivable)) OVER () = 0 THEN 0
-                            ELSE SUM(o.share_receivable) / SUM(SUM(o.share_receivable)) OVER () * 100 END AS revenue_share_pct
+                       COUNT(DISTINCT o.order_no) AS orders
                 FROM t_order_sku_detail o
                 {current_where}
                 GROUP BY o.platform
@@ -681,9 +687,7 @@ def api_dashboard(request: Request):
                        SUM(o.qty) AS qty,
                        SUM(o.share_receivable) AS revenue,
                        SUM(o.profit) AS profit,
-                       CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate,
-                       CASE WHEN SUM(SUM(o.share_receivable)) OVER () = 0 THEN 0
-                            ELSE SUM(o.share_receivable) / SUM(SUM(o.share_receivable)) OVER () * 100 END AS revenue_share_pct
+                       CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate
                 FROM t_order_sku_detail o
                 {current_where}
                 GROUP BY o.product_no, o.product_name, o.category, o.product_classification
@@ -693,6 +697,9 @@ def api_dashboard(request: Request):
                 current_params,
             )
             top_products = list(cur.fetchall())
+
+    attach_revenue_shares(platform_rows, summary["revenue"])
+    attach_revenue_shares(top_products, summary["revenue"])
 
     revenue = Decimal(summary["revenue"] or 0)
     profit = Decimal(summary["profit"] or 0)
@@ -914,9 +921,7 @@ def api_commerce_dashboard(request: Request):
                        COALESCE(SUM(o.profit), 0) AS profit,
                        COUNT(DISTINCT o.order_no) AS orders,
                        COUNT(DISTINCT o.customer_no) AS customers,
-                       CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate,
-                       CASE WHEN SUM(SUM(o.share_receivable)) OVER () = 0 THEN 0
-                            ELSE SUM(o.share_receivable) / SUM(SUM(o.share_receivable)) OVER () * 100 END AS revenue_share_pct
+                       CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate
                 FROM t_order_sku_detail o
                 {where}
                 GROUP BY {dimension["group"]}
@@ -944,6 +949,8 @@ def api_commerce_dashboard(request: Request):
                 params,
             )
             risk_rows = list(cur.fetchall())
+
+    attach_revenue_shares(dimension_rows, summary["revenue"])
 
     return api_ok(
         {

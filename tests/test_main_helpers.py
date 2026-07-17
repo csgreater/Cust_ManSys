@@ -4,7 +4,13 @@ import unittest
 
 from fastapi import HTTPException
 
-from app.main import UnorderedBatchFingerprint, mask_sensitive_rows, update_batch_fingerprint, validate_date_filters
+from app.main import (
+    UnorderedBatchFingerprint,
+    attach_revenue_shares,
+    mask_sensitive_rows,
+    update_batch_fingerprint,
+    validate_date_filters,
+)
 
 
 class MainHelperTests(unittest.TestCase):
@@ -26,6 +32,17 @@ class MainHelperTests(unittest.TestCase):
         self.assertEqual(result[0]["receiver_name"], "王**")
         self.assertEqual(result[0]["receiver_phone"], "138****8000")
         self.assertNotIn("世纪大道", result[0]["receiver_address"])
+
+    def test_revenue_shares_reuse_full_summary_total(self) -> None:
+        rows = [{"revenue": 30}, {"revenue": 20}]
+
+        attach_revenue_shares(rows, 100)
+
+        self.assertEqual(float(rows[0]["revenue_share_pct"]), 30.0)
+        self.assertEqual(float(rows[1]["revenue_share_pct"]), 20.0)
+
+        attach_revenue_shares(rows, 0)
+        self.assertEqual(float(rows[0]["revenue_share_pct"]), 0.0)
 
     def test_batch_fingerprint_is_order_independent_and_ignores_excel_profit(self) -> None:
         first = {"order_no": "A", "product_no": "P1", "excel_profit": 10}

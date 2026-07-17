@@ -289,10 +289,22 @@ def build_sql(question: str, where: str, params: dict[str, Any], intent: dict[st
 
     select_parts = [DIMENSIONS[key].select_sql for key in dimensions]
     select_parts.extend(METRICS[key].select_sql for key in metrics)
+    share_total_join = ""
     if wants_share:
+        # MySQL 5.7 and older MariaDB releases do not support window functions.
+        # Compute the filtered grand total once in a one-row derived table, then
+        # wrap it in MAX() so the outer grouped query also satisfies
+        # ONLY_FULL_GROUP_BY.
+        share_total_join = f"""
+                CROSS JOIN (
+                  SELECT COALESCE(SUM(o.share_receivable), 0) AS total_revenue
+                  FROM t_order_sku_detail o
+                  {where}
+                ) share_totals
+                """
         select_parts.append(
-            "CASE WHEN SUM(SUM(o.share_receivable)) OVER () = 0 THEN 0 "
-            "ELSE SUM(o.share_receivable) / SUM(SUM(o.share_receivable)) OVER () * 100 END AS revenue_share_pct"
+            "CASE WHEN MAX(share_totals.total_revenue) = 0 THEN 0 "
+            "ELSE SUM(o.share_receivable) / MAX(share_totals.total_revenue) * 100 END AS revenue_share_pct"
         )
 
     group_parts = []
@@ -306,6 +318,7 @@ def build_sql(question: str, where: str, params: dict[str, Any], intent: dict[st
                 SELECT
                   {", ".join(select_parts)}
                 FROM t_order_sku_detail o
+                {share_total_join}
                 {where}
                 GROUP BY {group_by}
                 ORDER BY {order_by}
