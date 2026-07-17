@@ -24,6 +24,7 @@ class ImportServiceTests(unittest.TestCase):
 
     def valid_values(self) -> dict[str, object]:
         return {
+            "订单编号": "ORDER-001",
             "客户编号": "C-001",
             "渠道分类": "线上",
             "渠道平台": "平台 A",
@@ -52,6 +53,37 @@ class ImportServiceTests(unittest.TestCase):
 
         self.assertEqual(result.fail_rows, 1)
         self.assertIn("customer_no不能为空", result.rows[0]["error_message"])
+
+    def test_blank_numeric_required_value_is_not_treated_as_zero(self) -> None:
+        values = self.valid_values()
+        values["销售额"] = ""
+        with TemporaryDirectory() as temp:
+            result = parse_excel(self.create_workbook(Path(temp), values), batch_no="batch-blank-revenue")
+
+        self.assertEqual(result.fail_rows, 1)
+        self.assertIn("share_receivable不能为空", result.rows[0]["error_message"])
+
+    def test_order_number_and_ship_time_are_required(self) -> None:
+        values = self.valid_values()
+        values["订单编号"] = ""
+        values["发货时间"] = ""
+        with TemporaryDirectory() as temp:
+            result = parse_excel(self.create_workbook(Path(temp), values), batch_no="batch-missing-identity")
+
+        self.assertEqual(result.fail_rows, 1)
+        self.assertIn("order_no不能为空", result.rows[0]["error_message"])
+        self.assertIn("ship_time不能为空", result.rows[0]["error_message"])
+
+    def test_non_finite_and_oversized_numbers_are_rejected(self) -> None:
+        values = self.valid_values()
+        values["销售额"] = "NaN"
+        values["成本金额"] = "10000000000"
+        with TemporaryDirectory() as temp:
+            result = parse_excel(self.create_workbook(Path(temp), values), batch_no="batch-invalid-number")
+
+        self.assertEqual(result.fail_rows, 1)
+        self.assertIn("share_receivable必须是有限数字", result.rows[0]["error_message"])
+        self.assertIn("cost超出数据库可保存范围", result.rows[0]["error_message"])
 
 
 if __name__ == "__main__":

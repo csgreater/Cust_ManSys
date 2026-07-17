@@ -209,7 +209,7 @@ def detect_metrics(question: str) -> tuple[list[str], str, bool]:
         metrics.append("qty")
     if "利润率" in text or "毛利率" in text:
         metrics.append("profit_rate")
-    if "利润" in text or "毛利" in text:
+    if ("利润" in text or "毛利" in text) and "利润率" not in text and "毛利率" not in text:
         metrics.append("profit")
     if "成本" in text:
         metrics.append("cost")
@@ -221,7 +221,9 @@ def detect_metrics(question: str) -> tuple[list[str], str, bool]:
         if key not in unique_metrics:
             unique_metrics.append(key)
 
-    if "利润" in text:
+    if "利润率" in text or "毛利率" in text:
+        order_metric = "profit_rate"
+    elif "利润" in text or "毛利" in text:
         order_metric = "profit"
     elif any(word in text for word in ("销量", "数量", "件数")):
         order_metric = "qty"
@@ -289,8 +291,8 @@ def build_sql(question: str, where: str, params: dict[str, Any], intent: dict[st
     select_parts.extend(METRICS[key].select_sql for key in metrics)
     if wants_share:
         select_parts.append(
-            "CASE WHEN totals.total_revenue = 0 THEN 0 "
-            "ELSE SUM(o.share_receivable) / totals.total_revenue * 100 END AS revenue_share_pct"
+            "CASE WHEN SUM(SUM(o.share_receivable)) OVER () = 0 THEN 0 "
+            "ELSE SUM(o.share_receivable) / SUM(SUM(o.share_receivable)) OVER () * 100 END AS revenue_share_pct"
         )
 
     group_parts = []
@@ -300,21 +302,10 @@ def build_sql(question: str, where: str, params: dict[str, Any], intent: dict[st
     order_by = "month ASC" if dimensions == ["month"] else f"{order_metric} DESC"
     limit = 120 if len(dimensions) > 1 else 60
 
-    joins = ""
-    if wants_share:
-        joins = f"""
-                CROSS JOIN (
-                  SELECT COALESCE(SUM(o.share_receivable), 0) AS total_revenue
-                  FROM t_order_sku_detail o
-                  {where}
-                ) totals
-        """
-
     sql = f"""
                 SELECT
                   {", ".join(select_parts)}
                 FROM t_order_sku_detail o
-                {joins}
                 {where}
                 GROUP BY {group_by}
                 ORDER BY {order_by}

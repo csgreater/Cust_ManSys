@@ -50,11 +50,13 @@ HEADER_MAP = {
 OPTIONAL_HEADERS = {"货品分类"}
 REQUIRED_HEADERS = [header for header in HEADER_MAP if header not in OPTIONAL_HEADERS]
 REQUIRED_FIELDS = {
+    "order_no",
     "customer_no",
     "dept",
     "platform",
     "shop_name",
     "product_no",
+    "ship_time",
     "share_receivable",
     "cost",
     "excel_profit",
@@ -69,6 +71,14 @@ DECIMAL_FIELDS = {
     "aux_material",
     "share_cost",
     "excel_profit",
+}
+DECIMAL_MAX_ABS = {
+    "qty": Decimal("99999999.99"),
+    **{
+        field: Decimal("9999999999.99")
+        for field in DECIMAL_FIELDS
+        if field != "qty"
+    },
 }
 NON_NEGATIVE_FIELDS: set[str] = set()
 DEFAULT_SHIP_TIME = datetime(1970, 1, 1)
@@ -116,9 +126,12 @@ def to_decimal(value: Any) -> Decimal:
     if value in (None, ""):
         return Decimal("0")
     try:
-        return Decimal(str(value).replace(",", "").strip())
+        result = Decimal(str(value).replace(",", "").strip())
     except (InvalidOperation, AttributeError):
         raise ValueError("不是有效数字")
+    if not result.is_finite():
+        raise ValueError("必须是有限数字")
+    return result
 
 
 def to_text(value: Any) -> str:
@@ -194,13 +207,18 @@ def iter_excel_rows(path: Path, batch_no: str) -> Iterator[dict[str, Any]]:
             }
             errors: list[str] = []
             warnings: list[str] = []
+            missing_required: set[str] = set()
             for field, index in indexes.items():
                 value = values[index] if index < len(values) else None
+                if field in REQUIRED_FIELDS and value in (None, ""):
+                    missing_required.add(field)
                 try:
                     if field == "ship_time":
                         item[field] = to_datetime(value)
                     elif field in DECIMAL_FIELDS:
                         item[field] = to_decimal(value)
+                        if abs(item[field]) > DECIMAL_MAX_ABS[field]:
+                            raise ValueError("超出数据库可保存范围")
                     else:
                         item[field] = normalize_text(field, value)
                 except ValueError as exc:
@@ -208,7 +226,7 @@ def iter_excel_rows(path: Path, batch_no: str) -> Iterator[dict[str, Any]]:
                     errors.append(f"{field}{exc}")
 
             for field in REQUIRED_FIELDS:
-                if item.get(field) in (None, ""):
+                if field in missing_required or item.get(field) in (None, ""):
                     errors.append(f"{field}不能为空")
             for field in NON_NEGATIVE_FIELDS:
                 if item.get(field, Decimal("0")) < 0:

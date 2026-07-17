@@ -22,6 +22,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Red
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
+from pymysql.cursors import SSDictCursor
 from starlette.middleware.sessions import SessionMiddleware
 from openpyxl import Workbook
 
@@ -267,12 +268,19 @@ def default_filters(request: Request) -> dict[str, Any]:
     }
 
 
-def order_where(user: dict[str, Any], filters: dict[str, Any], alias: str = "o") -> tuple[str, dict[str, Any]]:
+def order_where(
+    user: dict[str, Any],
+    filters: dict[str, Any],
+    alias: str = "o",
+    *,
+    validate_dates: bool = True,
+) -> tuple[str, dict[str, Any]]:
+    if validate_dates:
+        validate_date_filters(filters)
     params = dict(filters)
-    try:
-        params["end_time_exclusive"] = (datetime.strptime(filters["end_time"], "%Y-%m-%d").date() + timedelta(days=1)).isoformat()
-    except (TypeError, ValueError):
-        params["end_time_exclusive"] = filters["end_time"]
+    params["end_time_exclusive"] = (
+        datetime.strptime(filters["end_time"], "%Y-%m-%d").date() + timedelta(days=1)
+    ).isoformat()
     clauses = [
         f"{alias}.ship_time >= %(start_time)s",
         f"{alias}.ship_time < %(end_time_exclusive)s",
@@ -312,6 +320,25 @@ def validate_date_filters(filters: dict[str, Any]) -> None:
         raise HTTPException(status_code=400, detail="开始日期不能晚于结束日期")
     if (end - start).days > 366 * 3:
         raise HTTPException(status_code=400, detail="单次分析时间范围不能超过 3 年")
+
+
+def percentage_change(current: Any, previous: Any) -> Decimal | None:
+    current_value = Decimal(current or 0)
+    previous_value = Decimal(previous or 0)
+    if previous_value == 0:
+        return None
+    return (current_value - previous_value) / abs(previous_value) * 100
+
+
+def mask_sensitive_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    for row in rows:
+        if "receiver_name" in row:
+            row["receiver_name"] = mask_name(row.get("receiver_name"))
+        if "receiver_phone" in row:
+            row["receiver_phone"] = mask_phone(row.get("receiver_phone"))
+        if "receiver_address" in row:
+            row["receiver_address"] = mask_address(row.get("receiver_address"))
+    return rows
 
 
 async def build_analysis_plan(user: dict[str, Any], body: dict[str, Any]) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any]]:
@@ -570,41 +597,131 @@ async def coding_plan_chat(request: Request, payload: CodingPlanChatPayload):
 def api_dashboard(request: Request):
     user = require_api_user(request, "view")
     filters = default_filters(request)
-    where, params = order_where(user, filters)
+    validate_date_filters(filters)
+    current_start = datetime.strptime(filters["start_time"], "%Y-%m-%d").date()
+    current_end = datetime.strptime(filters["end_time"], "%Y-%m-%d").date()
+    period_days = (current_end - current_start).days + 1
+    previous_end = current_start - timedelta(days=1)
+    previous_start = previous_end - timedelta(days=period_days - 1)
+
+    combined_filters = dict(filters)
+    combined_filters["start_time"] = previous_start.isoformat()
+    combined_filters["end_time"] = current_end.isoformat()
+    combined_where, combined_params = order_where(user, combined_filters, validate_dates=False)
+    combined_params.update(
+        {
+            "current_start": current_start.isoformat(),
+            "current_end_exclusive": (current_end + timedelta(days=1)).isoformat(),
+            "previous_start": previous_start.isoformat(),
+            "previous_end_exclusive": current_start.isoformat(),
+        }
+    )
+    current_where, current_params = order_where(user, filters)
+    trend_format = "%%Y-%%m-%%d" if period_days <= 62 else "%%Y-%%m"
+    trend_granularity = "day" if period_days <= 62 else "month"
+
     with connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 f"""
                 SELECT
-                  COALESCE(SUM(o.share_receivable),0) AS revenue,
-                  COALESCE(SUM(o.qty),0) AS qty,
-                  COALESCE(SUM(o.profit),0) AS profit,
-                  COUNT(DISTINCT o.order_no) AS orders
+                  COALESCE(SUM(CASE WHEN o.ship_time >= %(current_start)s AND o.ship_time < %(current_end_exclusive)s THEN o.share_receivable ELSE 0 END), 0) AS revenue,
+                  COALESCE(SUM(CASE WHEN o.ship_time >= %(current_start)s AND o.ship_time < %(current_end_exclusive)s THEN o.qty ELSE 0 END), 0) AS qty,
+                  COALESCE(SUM(CASE WHEN o.ship_time >= %(current_start)s AND o.ship_time < %(current_end_exclusive)s THEN o.profit ELSE 0 END), 0) AS profit,
+                  COUNT(DISTINCT CASE WHEN o.ship_time >= %(current_start)s AND o.ship_time < %(current_end_exclusive)s THEN o.order_no END) AS orders,
+                  COUNT(DISTINCT CASE WHEN o.ship_time >= %(current_start)s AND o.ship_time < %(current_end_exclusive)s THEN o.customer_no END) AS customers,
+                  COUNT(DISTINCT CASE WHEN o.ship_time >= %(current_start)s AND o.ship_time < %(current_end_exclusive)s THEN o.product_no END) AS products,
+                  COUNT(DISTINCT CASE WHEN o.ship_time >= %(current_start)s AND o.ship_time < %(current_end_exclusive)s AND o.profit < 0 THEN o.order_no END) AS loss_orders,
+                  SUM(CASE WHEN o.ship_time >= %(current_start)s AND o.ship_time < %(current_end_exclusive)s THEN 1 ELSE 0 END) AS detail_rows,
+                  MAX(CASE WHEN o.ship_time >= %(current_start)s AND o.ship_time < %(current_end_exclusive)s THEN o.ship_time END) AS latest_ship_time,
+                  COALESCE(SUM(CASE WHEN o.ship_time >= %(previous_start)s AND o.ship_time < %(previous_end_exclusive)s THEN o.share_receivable ELSE 0 END), 0) AS previous_revenue,
+                  COALESCE(SUM(CASE WHEN o.ship_time >= %(previous_start)s AND o.ship_time < %(previous_end_exclusive)s THEN o.profit ELSE 0 END), 0) AS previous_profit,
+                  COUNT(DISTINCT CASE WHEN o.ship_time >= %(previous_start)s AND o.ship_time < %(previous_end_exclusive)s THEN o.order_no END) AS previous_orders
                 FROM t_order_sku_detail o
-                {where}
+                {combined_where}
                 """,
-                params,
+                combined_params,
             )
             summary = cur.fetchone()
+            cur.execute(
+                f"""
+                SELECT DATE_FORMAT(o.ship_time, '{trend_format}') AS period,
+                       COALESCE(SUM(o.share_receivable), 0) AS revenue,
+                       COALESCE(SUM(o.profit), 0) AS profit,
+                       COUNT(DISTINCT o.order_no) AS orders
+                FROM t_order_sku_detail o
+                {current_where}
+                GROUP BY DATE_FORMAT(o.ship_time, '{trend_format}')
+                ORDER BY period ASC
+                LIMIT 400
+                """,
+                current_params,
+            )
+            trend_rows = list(cur.fetchall())
+            cur.execute(
+                f"""
+                SELECT o.platform,
+                       COALESCE(SUM(o.share_receivable), 0) AS revenue,
+                       COALESCE(SUM(o.profit), 0) AS profit,
+                       COUNT(DISTINCT o.order_no) AS orders,
+                       CASE WHEN SUM(SUM(o.share_receivable)) OVER () = 0 THEN 0
+                            ELSE SUM(o.share_receivable) / SUM(SUM(o.share_receivable)) OVER () * 100 END AS revenue_share_pct
+                FROM t_order_sku_detail o
+                {current_where}
+                GROUP BY o.platform
+                ORDER BY revenue DESC
+                LIMIT 12
+                """,
+                current_params,
+            )
+            platform_rows = list(cur.fetchall())
             cur.execute(
                 f"""
                 SELECT o.product_no, o.product_name, o.category, o.product_classification,
                        SUM(o.qty) AS qty,
                        SUM(o.share_receivable) AS revenue,
-                       SUM(o.profit) AS profit
+                       SUM(o.profit) AS profit,
+                       CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate,
+                       CASE WHEN SUM(SUM(o.share_receivable)) OVER () = 0 THEN 0
+                            ELSE SUM(o.share_receivable) / SUM(SUM(o.share_receivable)) OVER () * 100 END AS revenue_share_pct
                 FROM t_order_sku_detail o
-                {where}
+                {current_where}
                 GROUP BY o.product_no, o.product_name, o.category, o.product_classification
                 ORDER BY revenue DESC
                 LIMIT 8
                 """,
-                params,
+                current_params,
             )
             top_products = list(cur.fetchall())
+
     revenue = Decimal(summary["revenue"] or 0)
     profit = Decimal(summary["profit"] or 0)
     summary["profit_rate"] = (profit / revenue * 100) if revenue else Decimal("0")
-    return api_ok({"filters": filters, "summary": summary, "top_products": top_products})
+    summary["avg_order_value"] = revenue / summary["orders"] if summary["orders"] else Decimal("0")
+    previous_revenue = summary.pop("previous_revenue")
+    previous_profit = summary.pop("previous_profit")
+    previous_orders = summary.pop("previous_orders")
+    comparison = {
+        "start_time": previous_start.isoformat(),
+        "end_time": previous_end.isoformat(),
+        "revenue": previous_revenue,
+        "profit": previous_profit,
+        "orders": previous_orders,
+        "revenue_change_pct": percentage_change(summary["revenue"], previous_revenue),
+        "profit_change_pct": percentage_change(summary["profit"], previous_profit),
+        "orders_change_pct": percentage_change(summary["orders"], previous_orders),
+    }
+    return api_ok(
+        {
+            "filters": filters,
+            "summary": summary,
+            "comparison": comparison,
+            "trend": {"granularity": trend_granularity, "rows": trend_rows},
+            "platform_rows": platform_rows,
+            "top_products": top_products,
+            "meta": {"period_days": period_days},
+        }
+    )
 
 
 @app.get("/api/orders")
@@ -625,7 +742,7 @@ def api_orders(request: Request):
                 params,
             )
             rows = list(cur.fetchall())
-    return api_ok({"filters": filters, "rows": rows})
+    return api_ok({"filters": filters, "rows": mask_sensitive_rows(rows)})
 
 
 @app.get("/api/analytics/products")
@@ -798,13 +915,9 @@ def api_commerce_dashboard(request: Request):
                        COUNT(DISTINCT o.order_no) AS orders,
                        COUNT(DISTINCT o.customer_no) AS customers,
                        CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate,
-                       CASE WHEN totals.total_revenue = 0 THEN 0 ELSE SUM(o.share_receivable) / totals.total_revenue * 100 END AS revenue_share_pct
+                       CASE WHEN SUM(SUM(o.share_receivable)) OVER () = 0 THEN 0
+                            ELSE SUM(o.share_receivable) / SUM(SUM(o.share_receivable)) OVER () * 100 END AS revenue_share_pct
                 FROM t_order_sku_detail o
-                CROSS JOIN (
-                  SELECT COALESCE(SUM(o.share_receivable), 0) AS total_revenue
-                  FROM t_order_sku_detail o
-                  {where}
-                ) totals
                 {where}
                 GROUP BY {dimension["group"]}
                 ORDER BY {metric_order} DESC
@@ -972,22 +1085,25 @@ def api_import_detail(request: Request, batch_no: str):
             log = cur.fetchone()
             if not log:
                 raise HTTPException(status_code=404, detail="导入批次不存在")
-            cur.execute(
-                """
-                SELECT *
-                FROM tmp_order_import
-                WHERE batch_no = %(batch_no)s
-                ORDER BY COALESCE(error_message, '') <> '' DESC, row_no ASC
-                LIMIT 200
-                """,
-                {"batch_no": batch_no},
-            )
-            rows = list(cur.fetchall())
-    return api_ok({"log": log, "rows": rows})
+            rows: list[dict[str, Any]] = []
+            if log["status"] != "processing":
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM tmp_order_import
+                    WHERE batch_no = %(batch_no)s
+                    ORDER BY COALESCE(error_message, '') <> '' DESC, row_no ASC
+                    LIMIT 200
+                    """,
+                    {"batch_no": batch_no},
+                )
+                rows = list(cur.fetchall())
+    return api_ok({"log": log, "rows": mask_sensitive_rows(rows)})
 
 
 @app.post("/api/imports/{batch_no}/commit")
 def api_import_commit(request: Request, batch_no: str):
+    require_api_user(request, "import")
     response = import_commit(request, batch_no)
     if isinstance(response, RedirectResponse):
         return api_ok({"batch_no": batch_no})
@@ -1125,42 +1241,57 @@ def orders_export(request: Request):
         return user
     filters = default_filters(request)
     where, params = order_where(user, filters)
-    with connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"""
-                SELECT order_no, sku_id, order_source, customer_no, customer_name, dept, platform, shop_name,
-                       category, product_classification, product_name, product_no, unit, qty, share_receivable,
-                       receiver_name, receiver_address, receiver_phone,
-                       province, city, district, ship_time, cost, express_fee, logistics_fee,
-                       freight, aux_material, share_cost, profit
-                FROM t_order_sku_detail o
-                {where}
-                ORDER BY o.ship_time DESC
-                LIMIT 50000
-                """,
-                params,
-            )
-            rows = list(cur.fetchall())
+    headers = (
+        "order_no", "sku_id", "order_source", "customer_no", "customer_name", "dept", "platform", "shop_name",
+        "category", "product_classification", "product_name", "product_no", "unit", "qty", "share_receivable",
+        "receiver_name", "receiver_address", "receiver_phone", "province", "city", "district", "ship_time", "cost",
+        "express_fee", "logistics_fee", "freight", "aux_material", "share_cost", "profit",
+    )
+
+    def safe_csv_value(value: Any) -> Any:
+        if value is None:
+            return ""
+        if isinstance(value, str) and value.startswith(("=", "+", "-", "@", "\t", "\r")):
+            return f"'{value}"
+        return value
 
     def iter_csv():
         import io
 
         buffer = io.StringIO()
         writer = csv.writer(buffer)
-        headers = list(rows[0].keys()) if rows else ["empty"]
         writer.writerow(headers)
         yield "\ufeff" + buffer.getvalue()
         buffer.seek(0)
         buffer.truncate(0)
-        for row in rows:
-            writer.writerow([row[h] for h in headers])
-            yield buffer.getvalue()
-            buffer.seek(0)
-            buffer.truncate(0)
+        with connection() as conn:
+            with conn.cursor(SSDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    SELECT {', '.join(headers)}
+                    FROM t_order_sku_detail o
+                    {where}
+                    ORDER BY o.ship_time DESC
+                    LIMIT 50000
+                    """,
+                    params,
+                )
+                while True:
+                    rows = cur.fetchmany(500)
+                    if not rows:
+                        break
+                    for row in rows:
+                        writer.writerow([safe_csv_value(row[column]) for column in headers])
+                        yield buffer.getvalue()
+                        buffer.seek(0)
+                        buffer.truncate(0)
 
     filename = f"orders_{datetime.now():%Y%m%d%H%M%S}.csv"
-    return StreamingResponse(iter_csv(), media_type="text/csv", headers={"Content-Disposition": f"attachment; filename={filename}"})
+    return StreamingResponse(
+        iter_csv(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
 
 
 @app.get("/imports", response_class=HTMLResponse)
@@ -1176,23 +1307,28 @@ def imports_page(request: Request):
 
 
 @app.post("/imports/upload", response_class=HTMLResponse)
-async def upload_import(request: Request, file: UploadFile = File(...)):
+async def upload_import(request: Request, background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     user = require_user(request, "import")
     if isinstance(user, RedirectResponse):
         return user
     tmp_path: Path | None = None
     try:
+        active_batch = active_import_batch()
+        if active_batch:
+            raise HTTPException(status_code=409, detail=f"已有导入批次正在处理：{active_batch}，请完成后再上传下一份。")
+        batch_no = new_batch_no()
         tmp_path = await save_upload_to_temp(file)
-        result = parse_excel(tmp_path)
-        save_import_batch(result, file.filename, user)
+        create_import_batch(batch_no, file.filename or "", user["username"])
+        background_tasks.add_task(process_import_batch, tmp_path, batch_no, file.filename or "", user["username"])
     except HTTPException as exc:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
         return render(request, "imports.html", {"user": user, "logs": [], "error": str(exc.detail)})
     except Exception as exc:
         if tmp_path is not None:
             tmp_path.unlink(missing_ok=True)
         return render(request, "imports.html", {"user": user, "logs": [], "error": str(exc)})
-    tmp_path.unlink(missing_ok=True)
-    return redirect(f"/imports/{result.batch_no}")
+    return redirect(f"/imports/{batch_no}")
 
 
 IMPORT_COLUMNS = [
@@ -1235,6 +1371,30 @@ IMPORT_COLUMNS = [
     "error_message",
     "warning_message",
 ]
+FINGERPRINT_COLUMNS = tuple(
+    column
+    for column in IMPORT_COLUMNS
+    if column not in {"batch_no", "row_no", "excel_profit", "profit", "error_message", "warning_message"}
+)
+
+
+class UnorderedBatchFingerprint:
+    """Order-independent digest for the multiset of rows that will actually be persisted."""
+
+    _MODULUS = 1 << 256
+
+    def __init__(self) -> None:
+        self._count = 0
+        self._sum = 0
+
+    def update(self, payload: bytes) -> None:
+        row_digest = int.from_bytes(hashlib.sha256(payload).digest(), "big")
+        self._sum = (self._sum + row_digest) % self._MODULUS
+        self._count += 1
+
+    def hexdigest(self) -> str:
+        canonical = f"{self._count}:{self._sum:064x}".encode("ascii")
+        return hashlib.sha256(canonical).hexdigest()
 
 
 def insert_tmp_import_rows(cur, rows: list[dict[str, Any]]) -> None:
@@ -1256,39 +1416,48 @@ def fingerprint_value(value: Any) -> Any:
 
 
 def update_batch_fingerprint(hasher: Any, row: dict[str, Any]) -> None:
-    fingerprint_columns = [
-        column
-        for column in IMPORT_COLUMNS
-        if column not in {"batch_no", "row_no", "profit", "error_message", "warning_message"}
-    ]
-    payload = {column: fingerprint_value(row.get(column)) for column in fingerprint_columns}
+    payload = {column: fingerprint_value(row.get(column)) for column in FINGERPRINT_COLUMNS}
     hasher.update(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"))
-    hasher.update(b"\n")
 
 
 def create_import_batch(batch_no: str, filename: str, username: str) -> None:
     with connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM tmp_order_import WHERE batch_no = %(batch_no)s", {"batch_no": batch_no})
-            cur.execute(
-                """
-                INSERT INTO t_import_log
-                    (batch_no, import_user, file_name, total_rows, success_rows, fail_rows, duplicate_rows, file_hash, status, remark)
-                VALUES
-                    (%(batch_no)s, %(user)s, %(file_name)s, 0, 0, 0, 0, '', 'processing', '文件已上传，等待解析')
-                ON DUPLICATE KEY UPDATE
-                    import_user = VALUES(import_user),
-                    file_name = VALUES(file_name),
-                    total_rows = 0,
-                    success_rows = 0,
-                    fail_rows = 0,
-                    duplicate_rows = 0,
-                    file_hash = '',
-                    status = 'processing',
-                    remark = '文件已上传，等待解析'
-                """,
-                {"batch_no": batch_no, "user": username, "file_name": filename},
-            )
+            lock_acquired = False
+            try:
+                cur.execute("SELECT GET_LOCK('order_manager_import_upload', 5) AS acquired")
+                lock_acquired = cur.fetchone()["acquired"] == 1
+                if not lock_acquired:
+                    raise HTTPException(status_code=409, detail="导入通道繁忙，请稍后重试。")
+                cur.execute(
+                    """
+                    SELECT batch_no
+                    FROM t_import_log
+                    WHERE status IN ('processing', 'committing')
+                    ORDER BY import_time DESC
+                    LIMIT 1
+                    """
+                )
+                active = cur.fetchone()
+                if active:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"已有导入批次正在处理：{active['batch_no']}，请完成后再上传下一份。",
+                    )
+                cur.execute("DELETE FROM tmp_order_import WHERE batch_no = %(batch_no)s", {"batch_no": batch_no})
+                cur.execute(
+                    """
+                    INSERT INTO t_import_log
+                        (batch_no, import_user, file_name, total_rows, success_rows, fail_rows, duplicate_rows, file_hash, status, remark)
+                    VALUES
+                        (%(batch_no)s, %(user)s, %(file_name)s, 0, 0, 0, 0, '', 'processing', '文件已上传，等待解析')
+                    """,
+                    {"batch_no": batch_no, "user": username, "file_name": filename},
+                )
+                conn.commit()
+            finally:
+                if lock_acquired:
+                    cur.execute("SELECT RELEASE_LOCK('order_manager_import_upload')")
 
 
 def active_import_batch() -> str | None:
@@ -1298,7 +1467,7 @@ def active_import_batch() -> str | None:
                 """
                 SELECT batch_no
                 FROM t_import_log
-                WHERE status = 'processing'
+                WHERE status IN ('processing', 'committing')
                 ORDER BY import_time DESC
                 LIMIT 1
                 """
@@ -1401,7 +1570,7 @@ def process_import_batch(tmp_path: Path, batch_no: str, filename: str, username:
     total_rows = 0
     fail_rows = 0
     buffer: list[dict[str, Any]] = []
-    hasher = hashlib.sha256()
+    hasher = UnorderedBatchFingerprint()
     try:
         update_import_log(batch_no, "processing", 0, 0, "正在解析 Excel")
         for row in iter_excel_rows(tmp_path, batch_no):
@@ -1529,49 +1698,116 @@ def import_commit(request: Request, batch_no: str):
     if isinstance(user, RedirectResponse):
         return user
     with connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT status FROM t_import_log WHERE batch_no = %(batch_no)s", {"batch_no": batch_no})
-            log = cur.fetchone()
-            if not log:
-                raise HTTPException(status_code=404, detail="导入批次不存在")
-            if log["status"] == "committed":
-                return redirect(f"/imports/{batch_no}")
-            if log["status"] != "validated":
-                raise HTTPException(status_code=400, detail="批次尚未校验完成，不能确认入库")
-            cur.execute(
-                "SELECT COUNT(*) AS c FROM tmp_order_import WHERE batch_no = %(batch_no)s AND COALESCE(error_message, '') <> ''",
-                {"batch_no": batch_no},
-            )
-            if cur.fetchone()["c"]:
-                raise HTTPException(status_code=400, detail="存在异常数据，不能确认入库")
-            cur.execute(
-                """
-                INSERT INTO t_order_sku_detail (
-                  link_id, sku_id, order_source, customer_no, customer_name, dept, platform, shop_name, order_no, original_order_no,
-                  logistics_type, logistics_no, receiver_name, receiver_address, receiver_phone, category, product_classification, product_name,
-                  product_no, unit, qty, share_receivable, province, city, district, ship_time, cost, express_fee,
-                  logistics_fee, freight, aux_material, share_cost
+        lock_name = ""
+        lock_acquired = False
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT status, file_hash FROM t_import_log WHERE batch_no = %(batch_no)s", {"batch_no": batch_no})
+                log = cur.fetchone()
+                if not log:
+                    raise HTTPException(status_code=404, detail="导入批次不存在")
+
+                lock_seed = str(log.get("file_hash") or batch_no)
+                lock_name = f"order_commit_{hashlib.sha256(lock_seed.encode('utf-8')).hexdigest()[:40]}"
+                cur.execute("SELECT GET_LOCK(%(lock_name)s, 10) AS acquired", {"lock_name": lock_name})
+                lock_acquired = cur.fetchone()["acquired"] == 1
+                if not lock_acquired:
+                    raise HTTPException(status_code=409, detail="批次正在提交，请稍后查看结果。")
+
+                cur.execute("SELECT status, file_hash FROM t_import_log WHERE batch_no = %(batch_no)s", {"batch_no": batch_no})
+                log = cur.fetchone()
+                if log["status"] == "committed":
+                    return redirect(f"/imports/{batch_no}")
+                if log["status"] != "validated":
+                    raise HTTPException(status_code=400, detail="批次尚未校验完成，不能确认入库")
+
+                if log.get("file_hash"):
+                    cur.execute(
+                        """
+                        SELECT batch_no
+                        FROM t_import_log
+                        WHERE file_hash = %(file_hash)s
+                          AND status = 'committed'
+                          AND batch_no <> %(batch_no)s
+                        LIMIT 1
+                        """,
+                        {"file_hash": log["file_hash"], "batch_no": batch_no},
+                    )
+                    duplicate = cur.fetchone()
+                    if duplicate:
+                        cur.execute("DELETE FROM tmp_order_import WHERE batch_no = %(batch_no)s", {"batch_no": batch_no})
+                        cur.execute(
+                            """
+                            UPDATE t_import_log
+                            SET status = 'failed', fail_rows = total_rows, duplicate_rows = total_rows,
+                                remark = %(remark)s, import_time = NOW()
+                            WHERE batch_no = %(batch_no)s
+                            """,
+                            {
+                                "batch_no": batch_no,
+                                "remark": f"整批数据与已入库批次 {duplicate['batch_no']} 重复",
+                            },
+                        )
+                        conn.commit()
+                        return redirect(f"/imports/{batch_no}")
+
+                cur.execute(
+                    """
+                    UPDATE t_import_log
+                    SET status = 'committing', remark = '正在写入正式订单'
+                    WHERE batch_no = %(batch_no)s AND status = 'validated'
+                    """,
+                    {"batch_no": batch_no},
                 )
-                SELECT
-                  link_id, sku_id, order_source, customer_no, customer_name, dept, platform, shop_name, order_no, original_order_no,
-                  logistics_type, logistics_no, receiver_name, receiver_address, receiver_phone, category, product_classification, product_name,
-                  product_no, unit, qty, share_receivable, province, city, district, ship_time, cost, express_fee,
-                  logistics_fee, freight, aux_material, share_cost
-                FROM tmp_order_import
-                WHERE batch_no = %(batch_no)s
-                """,
-                {"batch_no": batch_no},
-            )
-            success_rows = cur.rowcount
-            cur.execute(
-                """
-                UPDATE t_import_log
-                SET success_rows = %(success_rows)s, fail_rows = 0, status = 'committed', import_time = NOW()
-                WHERE batch_no = %(batch_no)s
-                """,
-                {"success_rows": success_rows, "batch_no": batch_no},
-            )
-            cur.execute("DELETE FROM tmp_order_import WHERE batch_no = %(batch_no)s", {"batch_no": batch_no})
+                if cur.rowcount != 1:
+                    raise HTTPException(status_code=409, detail="批次状态已变化，请刷新后重试。")
+                cur.execute(
+                    "SELECT COUNT(*) AS c FROM tmp_order_import WHERE batch_no = %(batch_no)s AND COALESCE(error_message, '') <> ''",
+                    {"batch_no": batch_no},
+                )
+                if cur.fetchone()["c"]:
+                    raise HTTPException(status_code=400, detail="存在异常数据，不能确认入库")
+                cur.execute(
+                    """
+                    INSERT INTO t_order_sku_detail (
+                      link_id, sku_id, order_source, customer_no, customer_name, dept, platform, shop_name, order_no, original_order_no,
+                      logistics_type, logistics_no, receiver_name, receiver_address, receiver_phone, category, product_classification, product_name,
+                      product_no, unit, qty, share_receivable, province, city, district, ship_time, cost, express_fee,
+                      logistics_fee, freight, aux_material, share_cost
+                    )
+                    SELECT
+                      link_id, sku_id, order_source, customer_no, customer_name, dept, platform, shop_name, order_no, original_order_no,
+                      logistics_type, logistics_no, receiver_name, receiver_address, receiver_phone, category, product_classification, product_name,
+                      product_no, unit, qty, share_receivable, province, city, district, ship_time, cost, express_fee,
+                      logistics_fee, freight, aux_material, share_cost
+                    FROM tmp_order_import
+                    WHERE batch_no = %(batch_no)s
+                    """,
+                    {"batch_no": batch_no},
+                )
+                success_rows = cur.rowcount
+                cur.execute(
+                    """
+                    UPDATE t_import_log
+                    SET success_rows = %(success_rows)s, fail_rows = 0, status = 'committed',
+                        remark = %(remark)s, import_time = NOW()
+                    WHERE batch_no = %(batch_no)s AND status = 'committing'
+                    """,
+                    {
+                        "success_rows": success_rows,
+                        "batch_no": batch_no,
+                        "remark": f"已入库：共 {success_rows} 行",
+                    },
+                )
+                cur.execute("DELETE FROM tmp_order_import WHERE batch_no = %(batch_no)s", {"batch_no": batch_no})
+                conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            if lock_acquired:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT RELEASE_LOCK(%(lock_name)s)", {"lock_name": lock_name})
     return redirect(f"/imports/{batch_no}")
 
 
@@ -1762,5 +1998,11 @@ def load_roles_with_scopes() -> list[dict[str, Any]]:
 
 @app.exception_handler(403)
 def forbidden(request: Request, exc: HTTPException):
+    if request.url.path.startswith("/api/"):
+        return JSONResponse({"detail": exc.detail}, status_code=403)
     user = current_user(request)
-    return render(request, "error.html", {"user": user, "title": "没有权限", "message": exc.detail})
+    return templates.TemplateResponse(
+        "error.html",
+        {"request": request, "current_path": request.url.path, "user": user, "title": "没有权限", "message": exc.detail},
+        status_code=403,
+    )

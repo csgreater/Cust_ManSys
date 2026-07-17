@@ -14,65 +14,68 @@ def load_user_context(conn, user_id: int) -> dict[str, Any] | None:
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, username, display_name, is_active
-            FROM t_user
-            WHERE id = %(user_id)s AND is_active = 1
+            SELECT u.id, u.username, u.display_name, u.is_active,
+                   r.id AS role_id, r.role_code, r.role_name, r.permissions,
+                   s.scope_type, s.scope_value
+            FROM t_user u
+            LEFT JOIN t_user_role ur ON ur.user_id = u.id
+            LEFT JOIN t_role r ON r.id = ur.role_id
+            LEFT JOIN t_role_data_scope s ON s.role_id = r.id
+            WHERE u.id = %(user_id)s AND u.is_active = 1
+            ORDER BY r.id, s.scope_type, s.scope_value
             """,
             {"user_id": user_id},
         )
-        user = cur.fetchone()
-        if not user:
-            return None
+        rows = list(cur.fetchall())
+    if not rows:
+        return None
 
-        cur.execute(
-            """
-            SELECT r.id, r.role_code, r.role_name, r.permissions
-            FROM t_role r
-            INNER JOIN t_user_role ur ON ur.role_id = r.id
-            WHERE ur.user_id = %(user_id)s
-            """,
-            {"user_id": user_id},
-        )
-        roles = list(cur.fetchall())
-        role_ids = [role["id"] for role in roles]
-        scopes = {"dept": set(), "platform": set(), "shop": set()}
-        all_scopes = {"dept": False, "platform": False, "shop": False}
-        if role_ids:
-            placeholders = ",".join(["%s"] * len(role_ids))
-            cur.execute(
-                f"""
-                SELECT scope_type, scope_value
-                FROM t_role_data_scope
-                WHERE role_id IN ({placeholders})
-                """,
-                role_ids,
-            )
-            for row in cur.fetchall():
-                scope_type = row["scope_type"]
-                value = row["scope_value"]
-                if scope_type in scopes:
-                    if value == "*":
-                        all_scopes[scope_type] = True
-                    else:
-                        scopes[scope_type].add(value)
+    first = rows[0]
+    user: dict[str, Any] = {
+        "id": first["id"],
+        "username": first["username"],
+        "display_name": first["display_name"],
+        "is_active": first["is_active"],
+    }
+    roles_by_id: dict[int, dict[str, Any]] = {}
+    scopes = {"dept": set(), "platform": set(), "shop": set()}
+    all_scopes = {"dept": False, "platform": False, "shop": False}
+    for row in rows:
+        role_id = row.get("role_id")
+        if role_id is not None and role_id not in roles_by_id:
+            roles_by_id[role_id] = {
+                "id": role_id,
+                "role_code": row["role_code"],
+                "role_name": row["role_name"],
+                "permissions": row["permissions"],
+            }
+        scope_type = row.get("scope_type")
+        value = row.get("scope_value")
+        if scope_type in scopes and value:
+            if value == "*":
+                all_scopes[scope_type] = True
+            else:
+                scopes[scope_type].add(value)
 
-        permissions: set[str] = set()
-        role_codes = set()
-        for role in roles:
-            role_codes.add(role["role_code"])
-            permissions.update(p.strip() for p in (role["permissions"] or "").split(",") if p.strip())
+    roles = list(roles_by_id.values())
 
-        if "admin" in role_codes:
-            permissions.add("admin")
-            for key in all_scopes:
-                all_scopes[key] = True
+    permissions: set[str] = set()
+    role_codes = set()
+    for role in roles:
+        role_codes.add(role["role_code"])
+        permissions.update(p.strip() for p in (role["permissions"] or "").split(",") if p.strip())
 
-        user["roles"] = roles
-        user["role_codes"] = role_codes
-        user["permissions"] = permissions
-        user["scopes"] = {k: sorted(v) for k, v in scopes.items()}
-        user["all_scopes"] = all_scopes
-        return user
+    if "admin" in role_codes:
+        permissions.add("admin")
+        for key in all_scopes:
+            all_scopes[key] = True
+
+    user["roles"] = roles
+    user["role_codes"] = role_codes
+    user["permissions"] = permissions
+    user["scopes"] = {k: sorted(v) for k, v in scopes.items()}
+    user["all_scopes"] = all_scopes
+    return user
 
 
 def has_permission(user: dict[str, Any], permission: str) -> bool:
