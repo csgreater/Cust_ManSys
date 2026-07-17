@@ -59,10 +59,15 @@ class Settings:
     analytics_api_username: str = os.getenv("ANALYTICS_API_USERNAME", "analyst")
     analytics_rate_limit_per_minute: int = env_int("ANALYTICS_RATE_LIMIT_PER_MINUTE", 30)
     ark_analytics_enabled: bool = env_bool("ARK_ANALYTICS_ENABLED", False)
+    ark_coding_chat_enabled: bool = env_bool("ARK_CODING_CHAT_ENABLED", False)
     ark_base_url: str = os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/coding/v3").rstrip("/")
     ark_api_key: str = os.getenv("ARK_API_KEY", "")
     ark_model: str = os.getenv("ARK_MODEL", "")
     ark_timeout_seconds: int = env_int("ARK_TIMEOUT_SECONDS", 20)
+    ark_coding_max_output_tokens: int = env_int("ARK_CODING_MAX_OUTPUT_TOKENS", 1600)
+    ark_coding_rate_limit_per_minute: int = env_int("ARK_CODING_RATE_LIMIT_PER_MINUTE", 20)
+    ark_coding_daily_limit_per_user: int = env_int("ARK_CODING_DAILY_LIMIT_PER_USER", 50)
+    ark_coding_daily_alert_threshold: int = env_int("ARK_CODING_DAILY_ALERT_THRESHOLD", 40)
     admin_password: str = os.getenv("ADMIN_PASSWORD", "admin123")
     importer_password: str = os.getenv("IMPORTER_PASSWORD", "importer123")
     analyst_password: str = os.getenv("ANALYST_PASSWORD", "analyst123")
@@ -107,6 +112,17 @@ class Settings:
                 problems.append("ARK_MODEL is required when ARK_ANALYTICS_ENABLED=true")
             if not self.ark_base_url.startswith("https://"):
                 problems.append("ARK_BASE_URL must use HTTPS")
+        if self.ark_coding_chat_enabled:
+            if not self.ark_api_key:
+                problems.append("ARK_API_KEY is required when ARK_CODING_CHAT_ENABLED=true")
+            if not self.ark_model:
+                problems.append("ARK_MODEL is required when ARK_CODING_CHAT_ENABLED=true")
+            if not self.ark_base_url.startswith("https://"):
+                problems.append("ARK_BASE_URL must use HTTPS")
+            if self.ark_coding_daily_limit_per_user < 0:
+                problems.append("ARK_CODING_DAILY_LIMIT_PER_USER cannot be negative")
+            if self.ark_coding_daily_alert_threshold < 0:
+                problems.append("ARK_CODING_DAILY_ALERT_THRESHOLD cannot be negative")
 
         if problems:
             joined = "; ".join(problems)

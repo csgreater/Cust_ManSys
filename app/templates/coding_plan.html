@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#06172d">
+  <title>Ark Coding Plan · 对话工作台</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='coding_plan.css') }}">
+</head>
+<body>
+  <div class="ambient ambient-a"></div><div class="ambient ambient-b"></div>
+  <main class="shell">
+    <aside class="sidebar">
+      <a class="brand" href="/coding-plan" aria-label="Ark Coding Plan 首页">
+        <span class="brand-mark"><i></i><i></i><i></i></span>
+        <span><b>ARK</b><em>CODING PLAN</em></span>
+      </a>
+      <button id="new-chat" class="new-chat"><span>＋</span> 新建对话 <kbd>Ctrl K</kbd></button>
+      <div class="sidebar-label">RECENT SESSIONS</div>
+      <nav id="history" class="history" aria-label="历史会话"></nav>
+      <div class="sidebar-bottom">
+        <div class="gateway-card"><span class="pulse"></span><div><small>GATEWAY</small><strong id="gateway-state">正在检测</strong></div></div>
+        <a class="docs-link" href="https://console.volcengine.com/ark/region:cn-beijing/docs/82379/2188959?lang=zh" target="_blank" rel="noreferrer">查看接入文档 <span>↗</span></a>
+      </div>
+    </aside>
+
+    <section class="console">
+      <header class="topbar">
+        <div class="crumb"><span class="online-dot"></span><span>DEVELOPER CONSOLE</span><b>/</b><strong>对话工作台</strong></div>
+        <div class="topbar-right"><span id="model-name" class="model-pill">等待配置</span><button id="clear-chat" class="icon-button" title="清空当前对话" aria-label="清空当前对话">⌫</button></div>
+      </header>
+
+      <section class="chat-stage">
+        <div id="welcome" class="welcome">
+          <div class="orbit"><span></span><span></span><span></span><b>&lt;/&gt;</b></div>
+          <p class="eyebrow">ARK / CODING PLAN</p>
+          <h1>把想法，<em>编译成行动。</em></h1>
+          <p class="intro">面向开发任务的轻量对话界面。描述目标、粘贴报错或让它一起拆解代码。</p>
+          <div class="prompts" role="list">
+            <button class="prompt-card" data-prompt="请帮我设计一个用户登录接口，使用 FastAPI 和 JWT，给出目录结构与核心代码。"><span>01</span><b>搭建接口</b><small>FastAPI · JWT</small></button>
+            <button class="prompt-card" data-prompt="请分析这段代码可能存在的性能问题，并按优先级给出优化建议："><span>02</span><b>定位性能瓶颈</b><small>Profiling · Review</small></button>
+            <button class="prompt-card" data-prompt="为一个 Vue 3 管理后台设计可复用的表格组件 API，并给出 TypeScript 类型定义。"><span>03</span><b>设计组件 API</b><small>Vue 3 · TypeScript</small></button>
+          </div>
+        </div>
+        <div id="messages" class="messages" aria-live="polite"></div>
+      </section>
+
+      <footer class="composer-wrap">
+        <form id="chat-form" class="composer">
+          <textarea id="prompt" rows="1" placeholder="描述你的编码任务…" aria-label="输入编码任务"></textarea>
+          <div class="composer-bar"><span><kbd>Enter</kbd> 发送 <i>·</i> <kbd>Shift Enter</kbd> 换行</span><button id="send" type="submit"><span>发送</span><b>↵</b></button></div>
+        </form>
+        <p class="notice">API Key 仅保留在服务端。请仅在符合 Coding Plan 规则的 AI 编程场景中使用。</p>
+      </footer>
+    </section>
+  </main>
+  <script src="{{ url_for('static', path='coding_plan.js') }}"></script>
+</body>
+</html>

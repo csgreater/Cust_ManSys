@@ -246,17 +246,30 @@
           </section>
 
           <section v-if="view === 'imports'">
+            <section v-if="latestImportLog" :class="['import-gate', latestImportIsTerminal ? 'terminal' : latestValidUncommittedImport ? 'pending' : 'settled']">
+              <div class="import-gate-icon"><component :is="latestImportIsTerminal ? AlertTriangle : latestValidUncommittedImport ? CircleAlert : CheckCircle2" :size="20" /></div>
+              <div>
+                <p>{{ latestImportIsTerminal ? '上一批校验已终止' : latestValidUncommittedImport ? '上一批待确认入库' : '上一批已完成' }}</p>
+                <strong>{{ latestImportLog.file_name || latestImportLog.batch_no }}</strong>
+                <small>{{ importGateDescription }}</small>
+              </div>
+              <div class="import-gate-actions">
+                <button class="ghost" @click="openImport(latestImportLog.batch_no)">查看批次</button>
+                <button v-if="latestValidUncommittedImport" class="primary" @click="openImport(latestImportLog.batch_no)">去确认入库</button>
+              </div>
+            </section>
             <section class="import-layout">
               <div class="panel upload-card">
                 <UploadCloud :size="28" />
                 <h2>上传月度 Excel</h2>
+                <p class="upload-hint">先校验，后入库。校验异常的批次会终止，不会写入正式订单。</p>
                 <div v-if="importMessage.text" :class="importMessage.type === 'error' ? 'alert' : 'notice'">{{ importMessage.text }}</div>
-                <input type="file" accept=".xlsx,.xlsm" @change="selectedFile = $event.target.files[0]" />
+                <input ref="importFileInput" type="file" accept=".xlsx,.xlsm" @change="selectedFile = $event.target.files[0]" />
                 <div v-if="importBusy || uploadProgress > 0" class="upload-progress">
                   <span :style="{ width: `${uploadProgress}%` }"></span>
                   <b>{{ uploadProgress ? `${uploadProgress}%` : '等待服务器接收' }}</b>
                 </div>
-                <button class="primary" :disabled="importBusy" @click="selectedFile ? uploadFile(selectedFile) : showImportError('请先选择 Excel 文件')">
+                <button class="primary" :disabled="importBusy" @click="requestImportUpload">
                   {{ importBusy ? "正在处理..." : "上传并校验" }}
                 </button>
                 <a class="export-btn" href="/api/imports/template"><Download :size="16" /> 下载导入模板</a>
@@ -278,7 +291,7 @@
             <section v-if="importDetail" class="panel">
               <div class="panel-title">
                 <h2>{{ importDetail.log.batch_no }}</h2>
-                <button v-if="importDetail.log.status !== 'committed' && importDetail.log.fail_rows === 0 && importDetail.log.total_rows > 0" class="primary" @click="commitImport(importDetail.log.batch_no)">确认入库</button>
+                <button v-if="importDetail.log.status === 'validated' && importDetail.log.fail_rows === 0 && importDetail.log.total_rows > 0" class="primary" @click="commitImport(importDetail.log.batch_no)">确认入库</button>
               </div>
               <table>
                 <thead><tr><th>行号</th><th>订单</th><th>客户</th><th>地址</th><th>产品</th><th>利润</th><th>异常</th><th>提示</th></tr></thead>
@@ -291,6 +304,20 @@
                 </tbody>
               </table>
             </section>
+            <div v-if="uploadReminderOpen" class="import-reminder-backdrop" role="presentation" @click.self="cancelImportReminder">
+              <section class="import-reminder" role="alertdialog" aria-modal="true" aria-labelledby="import-reminder-title">
+                <div class="import-reminder-mark"><CircleAlert :size="24" /></div>
+                <div>
+                  <p class="kicker">IMPORT CHECKPOINT</p>
+                  <h2 id="import-reminder-title">上一批已校验通过，但尚未入库</h2>
+                  <p>“{{ latestValidUncommittedImport?.file_name || latestValidUncommittedImport?.batch_no }}”没有异常行。继续上传不会自动提交它，请确认这是你的预期操作。</p>
+                </div>
+                <div class="import-reminder-actions">
+                  <button class="ghost" @click="openPendingImport">先处理上一批</button>
+                  <button class="primary" @click="continueImportUpload">继续上传新文件</button>
+                </div>
+              </section>
+            </div>
           </section>
 
           <section v-if="view === 'products'">
@@ -376,9 +403,12 @@
 <script setup>
 import { computed, defineComponent, onMounted, reactive, ref, watch } from "vue";
 import {
+  AlertTriangle,
   BarChart3,
   Box,
   Building2,
+  CheckCircle2,
+  CircleAlert,
   Download,
   FileSpreadsheet,
   LayoutDashboard,
@@ -420,9 +450,11 @@ const loading = ref(false);
 const error = ref("");
 const rangeOpen = ref(false);
 const selectedFile = ref(null);
+const importFileInput = ref(null);
 const importBusy = ref(false);
 const uploadProgress = ref(0);
 const importMessage = reactive({ type: "", text: "" });
+const uploadReminderOpen = ref(false);
 let filterTimer = null;
 const me = reactive({ authenticated: false, permissions: [], role_codes: [] });
 const loginForm = reactive({ username: "admin", password: "" });
@@ -507,6 +539,23 @@ const smartPieStyle = computed(() => {
     return segment;
   });
   return { background: `conic-gradient(${segments.join(", ") || "#203235 0% 100%"})` };
+});
+const latestImportLog = computed(() => imports.logs?.[0] || null);
+const latestImportIsTerminal = computed(() => {
+  const log = latestImportLog.value;
+  return Boolean(log && (log.status === "failed" || (log.status === "validated" && Number(log.fail_rows || 0) > 0)));
+});
+const latestValidUncommittedImport = computed(() => {
+  const log = latestImportLog.value;
+  if (!log || log.status !== "validated" || Number(log.fail_rows || 0) > 0 || Number(log.total_rows || 0) <= 0) return null;
+  return log;
+});
+const importGateDescription = computed(() => {
+  const log = latestImportLog.value;
+  if (!log) return "";
+  if (latestImportIsTerminal.value) return `${log.remark || "存在校验异常"}。可直接上传修正后的文件。`;
+  if (latestValidUncommittedImport.value) return `共 ${log.total_rows} 行，校验通过。上传新文件前会再次提醒。`;
+  return log.remark || `状态：${log.status}`;
 });
 const presets = [
   ["last7", "近7天"], ["last30", "近30天"], ["lastWeek", "上周"], ["thisMonth", "本月"], ["lastMonth", "上月"],
@@ -725,6 +774,8 @@ async function uploadFile(file) {
     importMessage.type = "notice";
     importMessage.text = "正在上传：0%";
     const data = await uploadImportFile(file);
+    selectedFile.value = null;
+    if (importFileInput.value) importFileInput.value.value = "";
     importMessage.type = "notice";
     importMessage.text = "文件已上传，系统正在后台解析校验。";
     await openImport(data.batch_no);
@@ -735,6 +786,32 @@ async function uploadFile(file) {
     importBusy.value = false;
     uploadProgress.value = 0;
   }
+}
+
+function requestImportUpload() {
+  if (!selectedFile.value) {
+    showImportError("请先选择 Excel 文件");
+    return;
+  }
+  if (latestValidUncommittedImport.value) {
+    uploadReminderOpen.value = true;
+    return;
+  }
+  uploadFile(selectedFile.value);
+}
+
+function cancelImportReminder() {
+  uploadReminderOpen.value = false;
+}
+
+function continueImportUpload() {
+  uploadReminderOpen.value = false;
+  if (selectedFile.value) uploadFile(selectedFile.value);
+}
+
+function openPendingImport() {
+  uploadReminderOpen.value = false;
+  if (latestValidUncommittedImport.value) openImport(latestValidUncommittedImport.value.batch_no);
 }
 
 function uploadImportFile(file) {
@@ -812,6 +889,7 @@ async function pollImport(batchNo) {
 async function commitImport(batchNo) {
   await api(`/api/imports/${batchNo}/commit`, { method: "POST" });
   await openImport(batchNo);
+  Object.assign(imports, await api("/api/imports"));
 }
 
 async function saveRole(role) {

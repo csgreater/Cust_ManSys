@@ -14,18 +14,20 @@ from collections import defaultdict, deque
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
 from openpyxl import Workbook
 
 from app.config import BASE_DIR, settings
 from app.ark_analytics import ark_analytics_enabled, parse_analytics_intent
+from app.ark_coding import ArkCodingError, ask_coding_plan, coding_chat_enabled
 from app.db import connection
 from app.import_service import HEADER_MAP, ImportParseResult, iter_excel_rows, new_batch_no, parse_excel
 from app.nl_analytics import audit_sql_plan, build_chart, build_sql, normalize_rows, parse_question_filters, summarize_answer
@@ -53,6 +55,18 @@ IMPORT_INSERT_CHUNK_SIZE = 1000
 IMPORT_PROGRESS_INTERVAL = 5000
 analytics_logger = logging.getLogger("analytics_api")
 RATE_LIMIT_BUCKETS: dict[str, deque[float]] = defaultdict(deque)
+CODING_DAILY_COUNTS: dict[tuple[str, date], int] = defaultdict(int)
+CODING_DAILY_ALERTED: set[tuple[str, date]] = set()
+coding_logger = logging.getLogger("coding_plan")
+
+
+class CodingPlanMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
+class CodingPlanChatPayload(BaseModel):
+    messages: list[CodingPlanMessage]
 
 
 LEGACY_HTML_ROUTES = {
@@ -188,6 +202,46 @@ def rate_limit_analytics(request: Request, user: dict[str, Any]) -> None:
     if len(bucket) >= limit:
         raise HTTPException(status_code=429, detail=f"分析请求过于频繁，请稍后再试（每分钟最多 {limit} 次）")
     bucket.append(now)
+
+
+def coding_client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def rate_limit_coding_chat(request: Request, user: dict[str, Any]) -> None:
+    limit = max(1, settings.ark_coding_rate_limit_per_minute)
+    identity = f"coding:{user.get('username') or 'unknown'}:{coding_client_ip(request)}"
+    now = time.monotonic()
+    bucket = RATE_LIMIT_BUCKETS[identity]
+    while bucket and now - bucket[0] > 60:
+        bucket.popleft()
+    if len(bucket) >= limit:
+        raise HTTPException(status_code=429, detail=f"请求过于频繁，请稍后再试（每分钟最多 {limit} 次）。")
+    bucket.append(now)
+
+
+def consume_coding_daily_quota(user: dict[str, Any]) -> int | None:
+    limit = settings.ark_coding_daily_limit_per_user
+    if limit <= 0:
+        return None
+
+    today = date.today()
+    for key in tuple(CODING_DAILY_COUNTS):
+        if key[1] < today:
+            CODING_DAILY_COUNTS.pop(key, None)
+            CODING_DAILY_ALERTED.discard(key)
+    username = str(user.get("username") or "unknown")
+    key = (username, today)
+    next_count = CODING_DAILY_COUNTS[key] + 1
+    if next_count > limit:
+        raise HTTPException(status_code=429, detail="今日 Coding Plan 调用额度已用完，请明天再试。")
+
+    CODING_DAILY_COUNTS[key] = next_count
+    threshold = settings.ark_coding_daily_alert_threshold
+    if threshold > 0 and next_count >= threshold and key not in CODING_DAILY_ALERTED:
+        CODING_DAILY_ALERTED.add(key)
+        coding_logger.warning("coding_daily_alert user=%s calls=%s threshold=%s", username, next_count, threshold)
+    return max(0, limit - next_count)
 
 
 def api_ok(data: Any = None, **extra: Any) -> JSONResponse:
@@ -380,6 +434,14 @@ def login_page(request: Request):
     return render(request, "login.html", {"error": ""})
 
 
+@app.get("/coding-plan", response_class=HTMLResponse)
+def coding_plan_page(request: Request):
+    user = require_user(request)
+    if isinstance(user, RedirectResponse):
+        return user
+    return render(request, "coding_plan.html", {})
+
+
 @app.post("/login")
 def login(request: Request, username: str = Form(...), password: str = Form(...)):
     with connection() as conn:
@@ -432,6 +494,76 @@ def api_login(request: Request, username: str = Form(...), password: str = Form(
 def api_logout(request: Request):
     request.session.clear()
     return api_ok()
+
+
+@app.get("/api/coding-plan/status")
+def coding_plan_status(request: Request):
+    require_api_user(request)
+    return api_ok(
+        {
+            "enabled": coding_chat_enabled(),
+            "model": settings.ark_model if coding_chat_enabled() else "未配置",
+            "gateway": settings.ark_base_url,
+            "max_output_tokens": settings.ark_coding_max_output_tokens,
+        }
+    )
+
+
+@app.post("/api/coding-plan/chat")
+async def coding_plan_chat(request: Request, payload: CodingPlanChatPayload):
+    user = require_api_user(request)
+    if not coding_chat_enabled():
+        raise HTTPException(status_code=503, detail="服务尚未配置，请联系管理员设置服务端 Ark 环境变量。")
+    if not payload.messages:
+        raise HTTPException(status_code=400, detail="请先输入问题。")
+    if len(payload.messages) > 20:
+        raise HTTPException(status_code=400, detail="单次对话最多保留 20 条消息。")
+
+    messages = []
+    total_length = 0
+    for item in payload.messages:
+        content = item.content.strip()
+        if not content:
+            continue
+        if len(content) > 12000:
+            raise HTTPException(status_code=400, detail="单条消息不能超过 12000 个字符。")
+        total_length += len(content)
+        messages.append({"role": item.role, "content": content})
+    if not messages:
+        raise HTTPException(status_code=400, detail="请先输入问题。")
+    if total_length > 40000:
+        raise HTTPException(status_code=400, detail="本次对话内容过长，请开启新会话。")
+
+    rate_limit_coding_chat(request, user)
+    quota_remaining = consume_coding_daily_quota(user)
+    try:
+        result = await asyncio.to_thread(ask_coding_plan, messages)
+    except ArkCodingError as exc:
+        coding_logger.warning(
+            "coding_chat_failed user=%s client_ip=%s error=%s",
+            user.get("username"),
+            coding_client_ip(request),
+            type(exc).__name__,
+        )
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    usage = result["usage"]
+    coding_logger.info(
+        "coding_chat_completed user=%s client_ip=%s model=%s prompt_chars=%s usage=%s quota_remaining=%s",
+        user.get("username"),
+        coding_client_ip(request),
+        result["model"],
+        total_length,
+        usage,
+        quota_remaining,
+    )
+    return api_ok(
+        {
+            "message": {"role": "assistant", "content": result["content"]},
+            "usage": usage,
+            "model": result["model"],
+            "quota_remaining": quota_remaining,
+        }
+    )
 
 
 @app.get("/api/dashboard")
@@ -1247,7 +1379,7 @@ def finalize_import_batch(batch_no: str, total_rows: int, fail_rows: int, file_h
                         WHERE t.batch_no = l.batch_no AND t.error_message LIKE '%%重复%%'
                     ),
                     file_hash = %(file_hash)s,
-                    status = 'validated',
+                    status = %(status)s,
                     remark = %(remark)s
                 WHERE l.batch_no = %(batch_no)s
                 """,
@@ -1255,7 +1387,12 @@ def finalize_import_batch(batch_no: str, total_rows: int, fail_rows: int, file_h
                     "batch_no": batch_no,
                     "total_rows": total_rows,
                     "file_hash": file_hash,
-                    "remark": f"共 {total_rows} 行，异常 {fail_rows} 行",
+                    "status": "failed" if fail_rows else "validated",
+                    "remark": (
+                        f"校验未通过，已终止：共 {total_rows} 行，异常 {fail_rows} 行"
+                        if fail_rows
+                        else f"校验通过：共 {total_rows} 行"
+                    ),
                 },
             )
 
@@ -1322,7 +1459,7 @@ def save_import_batch(result: ImportParseResult, filename: str, user: dict[str, 
                 INSERT INTO t_import_log
                     (batch_no, import_user, file_name, total_rows, success_rows, fail_rows, duplicate_rows, file_hash, status, remark)
                 VALUES
-                    (%(batch_no)s, %(user)s, %(file_name)s, %(total_rows)s, 0, %(fail_rows)s, 0, '', 'validated', %(remark)s)
+                    (%(batch_no)s, %(user)s, %(file_name)s, %(total_rows)s, 0, %(fail_rows)s, 0, '', %(status)s, %(remark)s)
                 ON DUPLICATE KEY UPDATE
                     file_name = VALUES(file_name),
                     total_rows = VALUES(total_rows),
@@ -1336,7 +1473,12 @@ def save_import_batch(result: ImportParseResult, filename: str, user: dict[str, 
                     "file_name": filename,
                     "total_rows": result.total_rows,
                     "fail_rows": result.fail_rows,
-                    "remark": result.error_summary,
+                    "status": "failed" if result.fail_rows else "validated",
+                    "remark": (
+                        f"校验未通过，已终止：{result.error_summary}"
+                        if result.fail_rows
+                        else f"校验通过：{result.error_summary}"
+                    ),
                 },
             )
             cur.execute(
