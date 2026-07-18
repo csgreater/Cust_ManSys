@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app.config import settings  # noqa: E402
+from app.analytics_aggregates import create_dashboard_tables, create_product_monthly_table  # noqa: E402
 from app.db import connection, parse_database_url  # noqa: E402
 from app.security import hash_password  # noqa: E402
 
@@ -304,6 +305,9 @@ def seed_data() -> None:
 def main() -> None:
     create_database()
     create_tables()
+    with connection() as conn:
+        create_product_monthly_table(conn)
+        create_dashboard_tables(conn)
     seed_data()
     cfg = parse_database_url()
     print(f"Initialized database `{cfg.database}`.")

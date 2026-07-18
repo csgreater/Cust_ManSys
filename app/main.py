@@ -27,6 +27,13 @@ from starlette.middleware.sessions import SessionMiddleware
 from openpyxl import Workbook
 
 from app.config import BASE_DIR, settings
+from app.analytics_aggregates import (
+    can_use_global_monthly,
+    can_use_product_monthly,
+    product_monthly_where,
+    refresh_dashboard_months,
+    refresh_product_months,
+)
 from app.ark_analytics import ark_analytics_enabled, parse_analytics_intent
 from app.ark_coding import ArkCodingError, ask_coding_plan, coding_chat_enabled
 from app.db import connection
@@ -338,6 +345,60 @@ def attach_revenue_shares(rows: list[dict[str, Any]], total_revenue: Any) -> Non
         row["revenue_share_pct"] = revenue / total * 100 if total else Decimal("0")
 
 
+def attach_exact_product_counts(
+    cur,
+    rows: list[dict[str, Any]],
+    where: str,
+    params: dict[str, Any],
+    *,
+    by_shop: bool = False,
+    include_customers: bool = False,
+) -> None:
+    product_numbers = sorted({str(row.get("product_no") or "") for row in rows if row.get("product_no")})
+    if not product_numbers:
+        for row in rows:
+            row["orders"] = 0
+            if include_customers:
+                row["customers"] = 0
+        return
+
+    count_params = dict(params)
+    placeholders: list[str] = []
+    for index, product_no in enumerate(product_numbers):
+        key = f"candidate_product_{index}"
+        count_params[key] = product_no
+        placeholders.append(f"%({key})s")
+    shop_select = ", o.shop_name" if by_shop else ""
+    shop_group = ", o.shop_name" if by_shop else ""
+    customer_select = ", COUNT(DISTINCT o.customer_no) AS customers" if include_customers else ""
+    cur.execute(
+        f"""
+        SELECT o.product_no{shop_select},
+               COUNT(DISTINCT o.order_no) AS orders
+               {customer_select}
+        FROM t_order_sku_detail o
+        {where}
+          AND o.product_no IN ({','.join(placeholders)})
+        GROUP BY o.product_no{shop_group}
+        """,
+        count_params,
+    )
+    counts = {}
+    for count_row in cur.fetchall():
+        key = (
+            (count_row["product_no"], count_row["shop_name"])
+            if by_shop
+            else count_row["product_no"]
+        )
+        counts[key] = count_row
+    for row in rows:
+        key = (row.get("product_no"), row.get("shop_name")) if by_shop else row.get("product_no")
+        count_row = counts.get(key) or {}
+        row["orders"] = count_row.get("orders", 0)
+        if include_customers:
+            row["customers"] = count_row.get("customers", 0)
+
+
 def mask_sensitive_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for row in rows:
         if "receiver_name" in row:
@@ -611,6 +672,10 @@ def api_dashboard(request: Request):
     period_days = (current_end - current_start).days + 1
     previous_end = current_start - timedelta(days=1)
     previous_start = previous_end - timedelta(days=period_days - 1)
+    global_aggregate_available = can_use_global_monthly(user, filters)
+    if global_aggregate_available:
+        previous_start = add_months(current_start, -1)
+        previous_end = current_start - timedelta(days=1)
 
     combined_filters = dict(filters)
     combined_filters["start_time"] = previous_start.isoformat()
@@ -630,72 +695,147 @@ def api_dashboard(request: Request):
 
     with connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                f"""
-                SELECT
-                  COALESCE(SUM(CASE WHEN o.ship_time >= %(current_start)s AND o.ship_time < %(current_end_exclusive)s THEN o.share_receivable ELSE 0 END), 0) AS revenue,
-                  COALESCE(SUM(CASE WHEN o.ship_time >= %(current_start)s AND o.ship_time < %(current_end_exclusive)s THEN o.qty ELSE 0 END), 0) AS qty,
-                  COALESCE(SUM(CASE WHEN o.ship_time >= %(current_start)s AND o.ship_time < %(current_end_exclusive)s THEN o.profit ELSE 0 END), 0) AS profit,
-                  COUNT(DISTINCT CASE WHEN o.ship_time >= %(current_start)s AND o.ship_time < %(current_end_exclusive)s THEN o.order_no END) AS orders,
-                  COUNT(DISTINCT CASE WHEN o.ship_time >= %(current_start)s AND o.ship_time < %(current_end_exclusive)s THEN o.customer_no END) AS customers,
-                  COUNT(DISTINCT CASE WHEN o.ship_time >= %(current_start)s AND o.ship_time < %(current_end_exclusive)s THEN o.product_no END) AS products,
-                  COUNT(DISTINCT CASE WHEN o.ship_time >= %(current_start)s AND o.ship_time < %(current_end_exclusive)s AND o.profit < 0 THEN o.order_no END) AS loss_orders,
-                  SUM(CASE WHEN o.ship_time >= %(current_start)s AND o.ship_time < %(current_end_exclusive)s THEN 1 ELSE 0 END) AS detail_rows,
-                  MAX(CASE WHEN o.ship_time >= %(current_start)s AND o.ship_time < %(current_end_exclusive)s THEN o.ship_time END) AS latest_ship_time,
-                  COALESCE(SUM(CASE WHEN o.ship_time >= %(previous_start)s AND o.ship_time < %(previous_end_exclusive)s THEN o.share_receivable ELSE 0 END), 0) AS previous_revenue,
-                  COALESCE(SUM(CASE WHEN o.ship_time >= %(previous_start)s AND o.ship_time < %(previous_end_exclusive)s THEN o.profit ELSE 0 END), 0) AS previous_profit,
-                  COUNT(DISTINCT CASE WHEN o.ship_time >= %(previous_start)s AND o.ship_time < %(previous_end_exclusive)s THEN o.order_no END) AS previous_orders
-                FROM t_order_sku_detail o
-                {combined_where}
-                """,
-                combined_params,
-            )
-            summary = cur.fetchone()
-            cur.execute(
-                f"""
-                SELECT DATE_FORMAT(o.ship_time, '{trend_format}') AS period,
-                       COALESCE(SUM(o.share_receivable), 0) AS revenue,
-                       COALESCE(SUM(o.profit), 0) AS profit,
-                       COUNT(DISTINCT o.order_no) AS orders
-                FROM t_order_sku_detail o
-                {current_where}
-                GROUP BY DATE_FORMAT(o.ship_time, '{trend_format}')
-                ORDER BY period ASC
-                LIMIT 400
-                """,
-                current_params,
-            )
-            trend_rows = list(cur.fetchall())
-            cur.execute(
-                f"""
-                SELECT o.platform,
-                       COALESCE(SUM(o.share_receivable), 0) AS revenue,
-                       COALESCE(SUM(o.profit), 0) AS profit,
-                       COUNT(DISTINCT o.order_no) AS orders
-                FROM t_order_sku_detail o
-                {current_where}
-                GROUP BY o.platform
-                ORDER BY revenue DESC
-                LIMIT 12
-                """,
-                current_params,
-            )
-            platform_rows = list(cur.fetchall())
-            cur.execute(
-                f"""
-                SELECT o.product_no, o.product_name, o.category, o.product_classification,
-                       SUM(o.qty) AS qty,
-                       SUM(o.share_receivable) AS revenue,
-                       SUM(o.profit) AS profit,
-                       CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate
-                FROM t_order_sku_detail o
-                {current_where}
-                GROUP BY o.product_no, o.product_name, o.category, o.product_classification
-                ORDER BY revenue DESC
-                LIMIT 8
-                """,
-                current_params,
-            )
+            if global_aggregate_available:
+                monthly_params = {
+                    "current_month": current_start.isoformat(),
+                    "previous_month": previous_start.isoformat(),
+                    "current_end_exclusive": (current_end + timedelta(days=1)).isoformat(),
+                }
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM agg_dashboard_monthly
+                    WHERE stat_month IN (%(current_month)s, %(previous_month)s)
+                    """,
+                    monthly_params,
+                )
+                monthly_rows = {row["stat_month"]: row for row in cur.fetchall()}
+                current_row = monthly_rows.get(current_start, {})
+                previous_row = monthly_rows.get(previous_start, {})
+                summary = {
+                    "revenue": current_row.get("revenue", Decimal("0")),
+                    "qty": current_row.get("qty", Decimal("0")),
+                    "profit": current_row.get("profit", Decimal("0")),
+                    "orders": current_row.get("orders", 0),
+                    "customers": current_row.get("customers", 0),
+                    "products": current_row.get("products", 0),
+                    "loss_orders": current_row.get("loss_orders", 0),
+                    "detail_rows": current_row.get("detail_rows", 0),
+                    "latest_ship_time": current_row.get("latest_ship_time"),
+                    "previous_revenue": previous_row.get("revenue", Decimal("0")),
+                    "previous_profit": previous_row.get("profit", Decimal("0")),
+                    "previous_orders": previous_row.get("orders", 0),
+                }
+                cur.execute(
+                    """
+                    SELECT DATE_FORMAT(stat_date, '%%Y-%%m-%%d') AS period,
+                           revenue, profit, orders
+                    FROM agg_dashboard_daily
+                    WHERE stat_date >= %(current_month)s
+                      AND stat_date < %(current_end_exclusive)s
+                    ORDER BY stat_date ASC
+                    LIMIT 400
+                    """,
+                    monthly_params,
+                )
+                trend_rows = list(cur.fetchall())
+                cur.execute(
+                    """
+                    SELECT platform, revenue, profit, orders
+                    FROM agg_platform_monthly
+                    WHERE stat_month = %(current_month)s
+                    ORDER BY revenue DESC
+                    LIMIT 12
+                    """,
+                    monthly_params,
+                )
+                platform_rows = list(cur.fetchall())
+            else:
+                cur.execute(
+                    f"""
+                    SELECT
+                      COALESCE(SUM(CASE WHEN o.ship_time >= %(current_start)s AND o.ship_time < %(current_end_exclusive)s THEN o.share_receivable ELSE 0 END), 0) AS revenue,
+                      COALESCE(SUM(CASE WHEN o.ship_time >= %(current_start)s AND o.ship_time < %(current_end_exclusive)s THEN o.qty ELSE 0 END), 0) AS qty,
+                      COALESCE(SUM(CASE WHEN o.ship_time >= %(current_start)s AND o.ship_time < %(current_end_exclusive)s THEN o.profit ELSE 0 END), 0) AS profit,
+                      COUNT(DISTINCT CASE WHEN o.ship_time >= %(current_start)s AND o.ship_time < %(current_end_exclusive)s THEN o.order_no END) AS orders,
+                      COUNT(DISTINCT CASE WHEN o.ship_time >= %(current_start)s AND o.ship_time < %(current_end_exclusive)s THEN o.customer_no END) AS customers,
+                      COUNT(DISTINCT CASE WHEN o.ship_time >= %(current_start)s AND o.ship_time < %(current_end_exclusive)s THEN o.product_no END) AS products,
+                      COUNT(DISTINCT CASE WHEN o.ship_time >= %(current_start)s AND o.ship_time < %(current_end_exclusive)s AND o.profit < 0 THEN o.order_no END) AS loss_orders,
+                      SUM(CASE WHEN o.ship_time >= %(current_start)s AND o.ship_time < %(current_end_exclusive)s THEN 1 ELSE 0 END) AS detail_rows,
+                      MAX(CASE WHEN o.ship_time >= %(current_start)s AND o.ship_time < %(current_end_exclusive)s THEN o.ship_time END) AS latest_ship_time,
+                      COALESCE(SUM(CASE WHEN o.ship_time >= %(previous_start)s AND o.ship_time < %(previous_end_exclusive)s THEN o.share_receivable ELSE 0 END), 0) AS previous_revenue,
+                      COALESCE(SUM(CASE WHEN o.ship_time >= %(previous_start)s AND o.ship_time < %(previous_end_exclusive)s THEN o.profit ELSE 0 END), 0) AS previous_profit,
+                      COUNT(DISTINCT CASE WHEN o.ship_time >= %(previous_start)s AND o.ship_time < %(previous_end_exclusive)s THEN o.order_no END) AS previous_orders
+                    FROM t_order_sku_detail o
+                    {combined_where}
+                    """,
+                    combined_params,
+                )
+                summary = cur.fetchone()
+                cur.execute(
+                    f"""
+                    SELECT DATE_FORMAT(o.ship_time, '{trend_format}') AS period,
+                           COALESCE(SUM(o.share_receivable), 0) AS revenue,
+                           COALESCE(SUM(o.profit), 0) AS profit,
+                           COUNT(DISTINCT o.order_no) AS orders
+                    FROM t_order_sku_detail o
+                    {current_where}
+                    GROUP BY DATE_FORMAT(o.ship_time, '{trend_format}')
+                    ORDER BY period ASC
+                    LIMIT 400
+                    """,
+                    current_params,
+                )
+                trend_rows = list(cur.fetchall())
+                cur.execute(
+                    f"""
+                    SELECT o.platform,
+                           COALESCE(SUM(o.share_receivable), 0) AS revenue,
+                           COALESCE(SUM(o.profit), 0) AS profit,
+                           COUNT(DISTINCT o.order_no) AS orders
+                    FROM t_order_sku_detail o
+                    {current_where}
+                    GROUP BY o.platform
+                    ORDER BY revenue DESC
+                    LIMIT 12
+                    """,
+                    current_params,
+                )
+                platform_rows = list(cur.fetchall())
+            if can_use_product_monthly(filters):
+                aggregate_where, aggregate_params = product_monthly_where(user, filters)
+                cur.execute(
+                    f"""
+                    SELECT a.product_no, MAX(a.product_name) AS product_name,
+                           a.category, a.product_classification,
+                           SUM(a.qty) AS qty,
+                           SUM(a.revenue) AS revenue,
+                           SUM(a.profit) AS profit,
+                           CASE WHEN SUM(a.revenue) = 0 THEN 0 ELSE SUM(a.profit) / SUM(a.revenue) * 100 END AS profit_rate
+                    FROM agg_product_monthly a
+                    {aggregate_where}
+                    GROUP BY a.product_no, a.category, a.product_classification
+                    ORDER BY revenue DESC
+                    LIMIT 8
+                    """,
+                    aggregate_params,
+                )
+            else:
+                cur.execute(
+                    f"""
+                    SELECT o.product_no, o.product_name, o.category, o.product_classification,
+                           SUM(o.qty) AS qty,
+                           SUM(o.share_receivable) AS revenue,
+                           SUM(o.profit) AS profit,
+                           CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate
+                    FROM t_order_sku_detail o
+                    {current_where}
+                    GROUP BY o.product_no, o.product_name, o.category, o.product_classification
+                    ORDER BY revenue DESC
+                    LIMIT 8
+                    """,
+                    current_params,
+                )
             top_products = list(cur.fetchall())
 
     attach_revenue_shares(platform_rows, summary["revenue"])
@@ -759,41 +899,80 @@ def api_products(request: Request):
     where, params = order_where(user, filters)
     with connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                f"""
-                SELECT o.product_no, o.product_name, o.category, o.product_classification,
-                       SUM(o.qty) AS qty,
-                       SUM(o.share_receivable) AS revenue,
-                       SUM(o.cost) AS cost,
-                       SUM(o.profit) AS profit,
-                       CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate
-                FROM t_order_sku_detail o
-                {where}
-                GROUP BY o.product_no, o.product_name, o.category, o.product_classification
-                ORDER BY revenue DESC
-                LIMIT 100
-                """,
-                params,
-            )
-            rows = list(cur.fetchall())
-            cur.execute(
-                f"""
-                SELECT o.category,
-                       SUM(o.qty) AS qty,
-                       SUM(o.share_receivable) AS revenue,
-                       SUM(o.cost) AS cost,
-                       SUM(o.profit) AS profit,
-                       COUNT(DISTINCT o.product_no) AS product_count,
-                       CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate
-                FROM t_order_sku_detail o
-                {where}
-                GROUP BY o.category
-                ORDER BY revenue DESC
-                LIMIT 30
-                """,
-                params,
-            )
-            category_rows = list(cur.fetchall())
+            if can_use_product_monthly(filters):
+                aggregate_where, aggregate_params = product_monthly_where(user, filters)
+                cur.execute(
+                    f"""
+                    SELECT a.product_no, MAX(a.product_name) AS product_name,
+                           a.category, a.product_classification,
+                           SUM(a.qty) AS qty,
+                           SUM(a.revenue) AS revenue,
+                           SUM(a.cost) AS cost,
+                           SUM(a.profit) AS profit,
+                           CASE WHEN SUM(a.revenue) = 0 THEN 0 ELSE SUM(a.profit) / SUM(a.revenue) * 100 END AS profit_rate
+                    FROM agg_product_monthly a
+                    {aggregate_where}
+                    GROUP BY a.product_no, a.category, a.product_classification
+                    ORDER BY revenue DESC
+                    LIMIT 100
+                    """,
+                    aggregate_params,
+                )
+                rows = list(cur.fetchall())
+                cur.execute(
+                    f"""
+                    SELECT a.category,
+                           SUM(a.qty) AS qty,
+                           SUM(a.revenue) AS revenue,
+                           SUM(a.cost) AS cost,
+                           SUM(a.profit) AS profit,
+                           COUNT(DISTINCT a.product_no) AS product_count,
+                           CASE WHEN SUM(a.revenue) = 0 THEN 0 ELSE SUM(a.profit) / SUM(a.revenue) * 100 END AS profit_rate
+                    FROM agg_product_monthly a
+                    {aggregate_where}
+                    GROUP BY a.category
+                    ORDER BY revenue DESC
+                    LIMIT 30
+                    """,
+                    aggregate_params,
+                )
+                category_rows = list(cur.fetchall())
+            else:
+                cur.execute(
+                    f"""
+                    SELECT o.product_no, o.product_name, o.category, o.product_classification,
+                           SUM(o.qty) AS qty,
+                           SUM(o.share_receivable) AS revenue,
+                           SUM(o.cost) AS cost,
+                           SUM(o.profit) AS profit,
+                           CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate
+                    FROM t_order_sku_detail o
+                    {where}
+                    GROUP BY o.product_no, o.product_name, o.category, o.product_classification
+                    ORDER BY revenue DESC
+                    LIMIT 100
+                    """,
+                    params,
+                )
+                rows = list(cur.fetchall())
+                cur.execute(
+                    f"""
+                    SELECT o.category,
+                           SUM(o.qty) AS qty,
+                           SUM(o.share_receivable) AS revenue,
+                           SUM(o.cost) AS cost,
+                           SUM(o.profit) AS profit,
+                           COUNT(DISTINCT o.product_no) AS product_count,
+                           CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate
+                    FROM t_order_sku_detail o
+                    {where}
+                    GROUP BY o.category
+                    ORDER BY revenue DESC
+                    LIMIT 30
+                    """,
+                    params,
+                )
+                category_rows = list(cur.fetchall())
     return api_ok({"filters": filters, "rows": rows, "category_rows": category_rows})
 
 
@@ -876,79 +1055,163 @@ def api_commerce_dashboard(request: Request):
         metric = "revenue"
     where, params = order_where(user, filters)
     metric_order = "profit_rate" if metric == "profit_rate" else metric
+    aggregate_where = ""
+    aggregate_params: dict[str, Any] = {}
+    aggregate_available = can_use_product_monthly(filters)
+    global_aggregate_available = can_use_global_monthly(user, filters)
+    if aggregate_available:
+        aggregate_where, aggregate_params = product_monthly_where(user, filters)
 
     with connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                f"""
-                SELECT
-                  COALESCE(SUM(o.share_receivable), 0) AS revenue,
-                  COALESCE(SUM(o.qty), 0) AS qty,
-                  COALESCE(SUM(o.profit), 0) AS profit,
-                  COUNT(DISTINCT o.order_no) AS orders,
-                  COUNT(DISTINCT o.customer_no) AS customers,
-                  COUNT(DISTINCT o.product_no) AS products,
-                  CASE WHEN COUNT(DISTINCT o.order_no) = 0 THEN 0 ELSE SUM(o.share_receivable) / COUNT(DISTINCT o.order_no) END AS avg_order_value,
-                  CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate
-                FROM t_order_sku_detail o
-                {where}
-                """,
-                params,
-            )
-            summary = cur.fetchone()
-            cur.execute(
-                f"""
-                SELECT DATE_FORMAT(o.ship_time, '%%Y-%%m') AS month,
-                       COALESCE(SUM(o.share_receivable), 0) AS revenue,
-                       COALESCE(SUM(o.qty), 0) AS qty,
-                       COALESCE(SUM(o.profit), 0) AS profit,
-                       COUNT(DISTINCT o.order_no) AS orders,
-                       CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate
-                FROM t_order_sku_detail o
-                {where}
-                GROUP BY DATE_FORMAT(o.ship_time, '%%Y-%%m')
-                ORDER BY month ASC
-                LIMIT 36
-                """,
-                params,
-            )
-            trend_rows = list(cur.fetchall())
-            cur.execute(
-                f"""
-                SELECT {dimension["select"]},
-                       COALESCE(SUM(o.share_receivable), 0) AS revenue,
-                       COALESCE(SUM(o.qty), 0) AS qty,
-                       COALESCE(SUM(o.profit), 0) AS profit,
-                       COUNT(DISTINCT o.order_no) AS orders,
-                       COUNT(DISTINCT o.customer_no) AS customers,
-                       CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate
-                FROM t_order_sku_detail o
-                {where}
-                GROUP BY {dimension["group"]}
-                ORDER BY {metric_order} DESC
-                LIMIT 30
-                """,
-                params,
-            )
-            dimension_rows = list(cur.fetchall())
-            cur.execute(
-                f"""
-                SELECT o.product_no, o.product_name, o.product_classification, o.shop_name,
-                       COALESCE(SUM(o.share_receivable), 0) AS revenue,
-                       COALESCE(SUM(o.qty), 0) AS qty,
-                       COALESCE(SUM(o.profit), 0) AS profit,
-                       COUNT(DISTINCT o.order_no) AS orders,
-                       CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate
-                FROM t_order_sku_detail o
-                {where}
-                GROUP BY o.product_no, o.product_name, o.product_classification, o.shop_name
-                HAVING profit < 0 OR profit_rate < 10
-                ORDER BY profit ASC, revenue DESC
-                LIMIT 20
-                """,
-                params,
-            )
-            risk_rows = list(cur.fetchall())
+            if global_aggregate_available:
+                summary_params = {"stat_month": filters["start_time"]}
+                cur.execute(
+                    """
+                    SELECT
+                      COALESCE(SUM(a.revenue), 0) AS revenue,
+                      COALESCE(SUM(a.qty), 0) AS qty,
+                      COALESCE(SUM(a.profit), 0) AS profit,
+                      COALESCE(SUM(a.orders), 0) AS orders,
+                      COALESCE(SUM(a.customers), 0) AS customers,
+                      COALESCE(SUM(a.products), 0) AS products,
+                      CASE WHEN SUM(a.orders) = 0 THEN 0 ELSE SUM(a.revenue) / SUM(a.orders) END AS avg_order_value,
+                      CASE WHEN SUM(a.revenue) = 0 THEN 0 ELSE SUM(a.profit) / SUM(a.revenue) * 100 END AS profit_rate
+                    FROM agg_dashboard_monthly a
+                    WHERE a.stat_month = %(stat_month)s
+                    """,
+                    summary_params,
+                )
+                summary = cur.fetchone()
+                cur.execute(
+                    """
+                    SELECT DATE_FORMAT(a.stat_month, '%%Y-%%m') AS month,
+                           a.revenue, a.qty, a.profit, a.orders,
+                           CASE WHEN a.revenue = 0 THEN 0 ELSE a.profit / a.revenue * 100 END AS profit_rate
+                    FROM agg_dashboard_monthly a
+                    WHERE a.stat_month = %(stat_month)s
+                    """,
+                    summary_params,
+                )
+                trend_rows = list(cur.fetchall())
+            else:
+                cur.execute(
+                    f"""
+                    SELECT
+                      COALESCE(SUM(o.share_receivable), 0) AS revenue,
+                      COALESCE(SUM(o.qty), 0) AS qty,
+                      COALESCE(SUM(o.profit), 0) AS profit,
+                      COUNT(DISTINCT o.order_no) AS orders,
+                      COUNT(DISTINCT o.customer_no) AS customers,
+                      COUNT(DISTINCT o.product_no) AS products,
+                      CASE WHEN COUNT(DISTINCT o.order_no) = 0 THEN 0 ELSE SUM(o.share_receivable) / COUNT(DISTINCT o.order_no) END AS avg_order_value,
+                      CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate
+                    FROM t_order_sku_detail o
+                    {where}
+                    """,
+                    params,
+                )
+                summary = cur.fetchone()
+                cur.execute(
+                    f"""
+                    SELECT DATE_FORMAT(o.ship_time, '%%Y-%%m') AS month,
+                           COALESCE(SUM(o.share_receivable), 0) AS revenue,
+                           COALESCE(SUM(o.qty), 0) AS qty,
+                           COALESCE(SUM(o.profit), 0) AS profit,
+                           COUNT(DISTINCT o.order_no) AS orders,
+                           CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate
+                    FROM t_order_sku_detail o
+                    {where}
+                    GROUP BY DATE_FORMAT(o.ship_time, '%%Y-%%m')
+                    ORDER BY month ASC
+                    LIMIT 36
+                    """,
+                    params,
+                )
+                trend_rows = list(cur.fetchall())
+            if aggregate_available and dimension_key == "product" and metric != "orders":
+                cur.execute(
+                    f"""
+                    SELECT a.product_no, MAX(a.product_name) AS product_name,
+                           COALESCE(SUM(a.revenue), 0) AS revenue,
+                           COALESCE(SUM(a.qty), 0) AS qty,
+                           COALESCE(SUM(a.profit), 0) AS profit,
+                           CASE WHEN SUM(a.revenue) = 0 THEN 0 ELSE SUM(a.profit) / SUM(a.revenue) * 100 END AS profit_rate
+                    FROM agg_product_monthly a
+                    {aggregate_where}
+                    GROUP BY a.product_no
+                    ORDER BY {metric_order} DESC
+                    LIMIT 30
+                    """,
+                    aggregate_params,
+                )
+                dimension_rows = list(cur.fetchall())
+                attach_exact_product_counts(
+                    cur,
+                    dimension_rows,
+                    where,
+                    params,
+                    include_customers=True,
+                )
+            else:
+                cur.execute(
+                    f"""
+                    SELECT {dimension["select"]},
+                           COALESCE(SUM(o.share_receivable), 0) AS revenue,
+                           COALESCE(SUM(o.qty), 0) AS qty,
+                           COALESCE(SUM(o.profit), 0) AS profit,
+                           COUNT(DISTINCT o.order_no) AS orders,
+                           COUNT(DISTINCT o.customer_no) AS customers,
+                           CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate
+                    FROM t_order_sku_detail o
+                    {where}
+                    GROUP BY {dimension["group"]}
+                    ORDER BY {metric_order} DESC
+                    LIMIT 30
+                    """,
+                    params,
+                )
+                dimension_rows = list(cur.fetchall())
+
+            if aggregate_available:
+                cur.execute(
+                    f"""
+                    SELECT a.product_no, MAX(a.product_name) AS product_name,
+                           a.product_classification, a.shop_name,
+                           COALESCE(SUM(a.revenue), 0) AS revenue,
+                           COALESCE(SUM(a.qty), 0) AS qty,
+                           COALESCE(SUM(a.profit), 0) AS profit,
+                           CASE WHEN SUM(a.revenue) = 0 THEN 0 ELSE SUM(a.profit) / SUM(a.revenue) * 100 END AS profit_rate
+                    FROM agg_product_monthly a
+                    {aggregate_where}
+                    GROUP BY a.product_no, a.product_classification, a.shop_name
+                    HAVING profit < 0 OR profit_rate < 10
+                    ORDER BY profit ASC, revenue DESC
+                    LIMIT 20
+                    """,
+                    aggregate_params,
+                )
+                risk_rows = list(cur.fetchall())
+                attach_exact_product_counts(cur, risk_rows, where, params, by_shop=True)
+            else:
+                cur.execute(
+                    f"""
+                    SELECT o.product_no, o.product_name, o.product_classification, o.shop_name,
+                           COALESCE(SUM(o.share_receivable), 0) AS revenue,
+                           COALESCE(SUM(o.qty), 0) AS qty,
+                           COALESCE(SUM(o.profit), 0) AS profit,
+                           COUNT(DISTINCT o.order_no) AS orders,
+                           CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate
+                    FROM t_order_sku_detail o
+                    {where}
+                    GROUP BY o.product_no, o.product_name, o.product_classification, o.shop_name
+                    HAVING profit < 0 OR profit_rate < 10
+                    ORDER BY profit ASC, revenue DESC
+                    LIMIT 20
+                    """,
+                    params,
+                )
+                risk_rows = list(cur.fetchall())
 
     attach_revenue_shares(dimension_rows, summary["revenue"])
 
@@ -1776,6 +2039,16 @@ def import_commit(request: Request, batch_no: str):
                     raise HTTPException(status_code=400, detail="存在异常数据，不能确认入库")
                 cur.execute(
                     """
+                    SELECT DISTINCT DATE_FORMAT(ship_time, '%%Y-%%m-01') AS stat_month
+                    FROM tmp_order_import
+                    WHERE batch_no = %(batch_no)s
+                    ORDER BY stat_month
+                    """,
+                    {"batch_no": batch_no},
+                )
+                affected_months = [row["stat_month"] for row in cur.fetchall()]
+                cur.execute(
+                    """
                     INSERT INTO t_order_sku_detail (
                       link_id, sku_id, order_source, customer_no, customer_name, dept, platform, shop_name, order_no, original_order_no,
                       logistics_type, logistics_no, receiver_name, receiver_address, receiver_phone, category, product_classification, product_name,
@@ -1793,6 +2066,8 @@ def import_commit(request: Request, batch_no: str):
                     {"batch_no": batch_no},
                 )
                 success_rows = cur.rowcount
+                refresh_product_months(conn, affected_months)
+                refresh_dashboard_months(conn, affected_months)
                 cur.execute(
                     """
                     UPDATE t_import_log

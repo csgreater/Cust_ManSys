@@ -6,9 +6,21 @@
 2. Set `APP_ENV=production`, `APP_SECURE_COOKIES=true`, and strong non-default passwords.
 3. Run `python scripts/init_db.py` on an empty production database.
 4. Run `python scripts/migrate_production_indexes.py` if the database was created before the production indexes were added.
-5. Run `python scripts/check_db_ready.py`.
-6. Confirm the application starts and `/healthz` plus `/readyz` return `200`.
-7. Change the default seeded passwords after first login if they were not customized through `.env`.
+5. Run the analytics aggregate migrations on databases that already contain order data:
+
+   ```bash
+   python scripts/migrate_analytics_aggregates.py
+   python scripts/migrate_dashboard_aggregates.py
+   ```
+
+6. Run `python scripts/check_db_ready.py`.
+7. Confirm the application starts and `/healthz` plus `/readyz` return `200`.
+8. Change the default seeded passwords after first login if they were not customized through `.env`.
+
+The aggregate migrations are idempotent. They rebuild monthly product analytics,
+global daily/monthly dashboard metrics, and monthly platform metrics from
+`t_order_sku_detail`. New committed imports refresh only their affected months.
+Keep the application stopped during the first backfill on a low-memory server.
 
 ## Existing database migrations
 

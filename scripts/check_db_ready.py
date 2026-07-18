@@ -17,6 +17,10 @@ REQUIRED_TABLES = {
     "t_role",
     "t_user_role",
     "t_role_data_scope",
+    "agg_product_monthly",
+    "agg_dashboard_monthly",
+    "agg_dashboard_daily",
+    "agg_platform_monthly",
 }
 
 REQUIRED_INDEXES = {
@@ -39,6 +43,15 @@ REQUIRED_INDEXES = {
     "t_role": {"PRIMARY", "role_code"},
     "t_user_role": {"PRIMARY", "idx_role_id"},
     "t_role_data_scope": {"PRIMARY", "uk_role_scope", "idx_scope_lookup"},
+    "agg_product_monthly": {
+        "PRIMARY",
+        "idx_agg_product_month_product",
+        "idx_agg_product_month_shop",
+        "idx_agg_product_month_category",
+    },
+    "agg_dashboard_monthly": {"PRIMARY"},
+    "agg_dashboard_daily": {"PRIMARY"},
+    "agg_platform_monthly": {"PRIMARY"},
 }
 
 REQUIRED_COLUMNS = {
@@ -123,6 +136,64 @@ REQUIRED_COLUMNS = {
         "warning_message",
         "create_time",
     },
+}
+
+REQUIRED_COLUMNS["agg_product_monthly"] = {
+    "stat_month",
+    "dept",
+    "platform",
+    "shop_name",
+    "category",
+    "product_classification",
+    "product_no",
+    "product_name",
+    "qty",
+    "revenue",
+    "cost",
+    "profit",
+    "detail_rows",
+    "order_count",
+    "latest_ship_time",
+    "refreshed_at",
+}
+
+REQUIRED_COLUMNS["agg_dashboard_monthly"] = {
+    "stat_month",
+    "revenue",
+    "qty",
+    "profit",
+    "orders",
+    "customers",
+    "products",
+    "loss_orders",
+    "detail_rows",
+    "latest_ship_time",
+    "refreshed_at",
+}
+
+REQUIRED_COLUMNS["agg_dashboard_daily"] = {
+    "stat_date",
+    "revenue",
+    "qty",
+    "profit",
+    "orders",
+    "customers",
+    "products",
+    "loss_orders",
+    "detail_rows",
+    "latest_ship_time",
+    "refreshed_at",
+}
+
+REQUIRED_COLUMNS["agg_platform_monthly"] = {
+    "stat_month",
+    "platform",
+    "revenue",
+    "qty",
+    "profit",
+    "orders",
+    "detail_rows",
+    "refreshed_at",
 }
 
 REQUIRED_COLUMNS["t_import_log"] = {
