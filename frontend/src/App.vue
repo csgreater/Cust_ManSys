@@ -52,7 +52,7 @@
         </header>
 
         <section class="command-status" aria-label="系统状态">
-          <div class="status-live"><span class="status-dot"></span><b>服务在线</b><small>ONLINE</small></div>
+          <div class="status-live"><span class="status-dot"></span><b>{{ currentLoadStatusLabel }}</b><small>{{ currentLoadStatus.toUpperCase() }}</small></div>
           <div class="status-item"><ShieldCheck :size="16" /><span>数据范围</span><b>{{ scopeSummary }}</b></div>
           <div class="status-item"><Database :size="16" /><span>当前周期</span><b>{{ filters.start_time }} — {{ filters.end_time }}</b></div>
           <div class="status-item"><Activity :size="16" /><span>最近刷新</span><b>{{ lastLoadedLabel }}</b></div>
@@ -63,36 +63,42 @@
           <CircleAlert :size="18" /><span>{{ pageError }}</span><button type="button" aria-label="关闭错误提示" @click="pageError = ''">×</button>
         </div>
 
-        <form v-if="['dashboard', 'commerce', 'orders', 'products', 'shops'].includes(view)" class="filter-suite" @submit.prevent="loadCurrent(true)">
-          <div class="range-control">
-            <span>订单日期</span>
-            <button type="button" @click="rangeOpen = !rangeOpen">{{ filters.start_time }} 至 {{ filters.end_time }}</button>
-            <div v-if="rangeOpen" class="range-pop">
-              <nav><button v-for="p in presets" :key="p[0]" type="button" @click="applyPreset(p[0])">{{ p[1] }}</button></nav>
-              <div class="range-custom">
-                <label>开始时间<input type="date" v-model="filters.start_time" /></label>
-                <b>至</b>
-                <label>结束时间<input type="date" v-model="filters.end_time" /></label>
-                <button class="primary" type="button" @click="rangeOpen=false; loadCurrent(true)">应用</button>
-              </div>
-            </div>
-          </div>
-          <label>部门<input v-model="filters.dept" placeholder="全部" /></label>
-          <label>平台<input v-model="filters.platform" placeholder="全部" /></label>
-          <label>店铺<input v-model="filters.shop_name" placeholder="全部" /></label>
-          <label v-if="['commerce','products'].includes(view)">大类<input v-model="filters.category" placeholder="全部" /></label>
-          <label v-if="['commerce','products'].includes(view)">货品分类<input v-model="filters.product_classification" placeholder="全部" /></label>
-          <label v-if="['commerce','orders','products'].includes(view)">产品/SKU<input v-model="filters.product" placeholder="名称、货号、SKU" /></label>
-          <label v-if="view === 'orders'">订单号<input v-model="filters.order_no" placeholder="订单编号" /></label>
-          <div class="filter-actions">
-            <button class="ghost" type="button" @click="resetFilters">重置</button>
-            <button class="primary" type="submit">执行筛选</button>
-          </div>
-        </form>
+        <WorkbenchFilters
+          v-if="['dashboard', 'exceptions', 'reports', 'commerce', 'products', 'shops'].includes(view)"
+          :model-value="filters"
+          :context="workbenchContext"
+          :fields="filterFields"
+          :status="currentLoadStatus"
+          @apply="applyWorkbenchFilters"
+        />
 
         <section v-if="loading" class="loading-panel">正在载入数据...</section>
 
         <template v-else>
+          <ExceptionCenter
+            v-if="view === 'exceptions'"
+            :api="api"
+            :filters="filters"
+            :context="workbenchContext"
+            :can-quality="can('import')"
+            :can-operating="can('analytics')"
+            :can-settings="can('settings')"
+            :can-export="can('export')"
+            :refresh-key="workbenchRefreshKey"
+            @summary="Object.assign(exceptionSummary, $event || {})"
+            @status="workbenchStatus = $event"
+          />
+
+          <ReportsCenter
+            v-if="view === 'reports'"
+            :api="api"
+            :filters="filters"
+            :can-export="can('export')"
+            :refresh-key="workbenchRefreshKey"
+            @latest="latestReport = $event"
+            @status="workbenchStatus = $event"
+          />
+
           <section v-if="view === 'commerce'" class="commerce-board">
             <section class="commerce-toolbar">
               <div>
@@ -163,20 +169,109 @@
 
           <section v-if="view === 'smart'" class="smart-layout">
             <section class="panel smart-query">
-              <div class="panel-title"><h2>自然语言分析</h2><span>生成受控 SQL 并返回图表</span></div>
+              <div class="panel-title">
+                <div><p class="kicker">CONTROLLED ANALYSIS PIPELINE</p><h2>把经营问题交给分析编排器</h2></div>
+                <span>可核对 · 可纠偏 · 只读查询</span>
+              </div>
               <div class="smart-query-body">
-                <textarea v-model="smart.question" placeholder="例如：今年1-5月各产品销售额占比，按销售额排序"></textarea>
+                <textarea v-model="smart.question" :disabled="smart.busy" placeholder="例如：看抖音平台华东区域女装今年上半年的销售额、利润率和月度趋势"></textarea>
                 <div class="smart-actions">
-                  <button class="primary" :disabled="smart.busy" @click="askSmart"><Sparkles :size="16" /> {{ smart.busy ? "分析中..." : "开始分析" }}</button>
-                  <button v-for="example in smartExamples" :key="example" class="ghost" type="button" @click="smart.question = example; askSmart()">{{ example }}</button>
+                  <button class="primary smart-run" :disabled="smart.busy" @click="askSmart()"><Sparkles :size="16" /> {{ smart.busy ? "分析编排中..." : "开始智能分析" }}</button>
+                  <button v-for="example in smartExamples" :key="example" class="ghost" type="button" :disabled="smart.busy" @click="smart.question = example; askSmart()">{{ example }}</button>
                 </div>
                 <div v-if="smart.error" class="alert">{{ smart.error }}</div>
               </div>
             </section>
 
-            <section v-if="smart.result" class="panel smart-answer">
-              <div class="panel-title"><h2>分析结论</h2><span>{{ smart.result.parser === "ark" ? "Ark 解析" : "规则解析" }} / {{ smart.result.filters.start_time }} 至 {{ smart.result.filters.end_time }}</span></div>
-              <div class="smart-summary">{{ smart.result.answer }}</div>
+            <section v-if="smart.busy || smart.steps.length || smartIntent" class="smart-workbench">
+              <aside class="panel smart-process">
+                <div class="panel-title"><h2>分析过程</h2><span>LIVE TRACE</span></div>
+                <div class="smart-timeline">
+                  <article v-for="(step, index) in smartStageRows" :key="step.stage" :class="['smart-step', step.status]">
+                    <div class="smart-step-mark"><span>{{ index + 1 }}</span></div>
+                    <div>
+                      <div class="smart-step-head"><strong>{{ step.title }}</strong><small>{{ formatSmartElapsed(step.elapsed_ms) }}</small></div>
+                      <p>{{ step.summary }}</p>
+                    </div>
+                  </article>
+                </div>
+                <div class="process-disclosure">
+                  <ShieldCheck :size="15" />
+                  <span>这里展示可核对的执行阶段与口径，不展示模型隐式思维。</span>
+                </div>
+              </aside>
+
+              <div class="smart-output-stack">
+                <section v-if="smartIntent" class="panel smart-intent-card">
+                  <div class="panel-title">
+                    <div><p class="kicker">INTERPRETED SCOPE</p><h2>系统理解的分析口径</h2></div>
+                    <div class="intent-status">
+                      <span :class="['parser-badge', smart.result?.parser_source || smart.clarification?.parser_source]">{{ smartParserLabel(smart.result?.parser_source || smart.clarification?.parser_source) }}</span>
+                      <button v-if="smart.result" class="ghost compact" type="button" @click="openSmartIntentReview">纠正口径</button>
+                    </div>
+                  </div>
+                  <div class="intent-overview">
+                    <strong>{{ smartAnalysisTypeLabel(smartIntent.analysis_type) }}</strong>
+                    <span>置信度 {{ Math.round(Number(smartIntent.confidence || 0) * 100) }}%</span>
+                  </div>
+                  <div class="intent-chips">
+                    <span v-for="(chip, index) in smartIntentChips" :key="`${chip.text}-${index}`" :class="chip.tone">{{ chip.text }}</span>
+                  </div>
+                  <div v-if="smartIntent.assumptions?.length" class="intent-assumptions">
+                    <AlertTriangle :size="15" />
+                    <span>{{ smartIntent.assumptions.join("；") }}</span>
+                  </div>
+                  <div v-for="warning in (smart.result?.warnings || smart.clarification?.warnings || [])" :key="warning" class="intent-warning">{{ warning }}</div>
+                </section>
+
+                <section v-if="smart.clarification" class="panel smart-correction">
+                  <div class="panel-title"><h2>需要你确认</h2><span>分析已暂停，尚未查询数据</span></div>
+                  <div class="correction-intro">
+                    <CircleAlert :size="20" />
+                    <div><strong>有些口径不应该由系统替你猜</strong><p>核对或修改下面的字段，确认后会重新执行权限校验和安全审计。</p></div>
+                  </div>
+                  <div class="correction-core">
+                    <label>开始日期<input v-model="smart.corrections._start_time" type="date" /></label>
+                    <label>结束日期<input v-model="smart.corrections._end_time" type="date" /></label>
+                    <label>分析类型
+                      <select v-model="smart.corrections._analysis_type"><option v-for="item in smartAnalysisTypes" :key="item.key" :value="item.key">{{ item.label }}</option></select>
+                    </label>
+                    <label>主要维度
+                      <select v-model="smart.corrections._dimension"><option v-for="item in smartDimensionOptions" :key="item.key" :value="item.key">{{ item.label }}</option></select>
+                    </label>
+                    <label>主要指标
+                      <select v-model="smart.corrections._metric"><option v-for="item in smartMetricOptions" :key="item.key" :value="item.key">{{ item.label }}</option></select>
+                    </label>
+                    <label>展示数量<input v-model.number="smart.corrections._limit" type="number" min="1" max="50" /></label>
+                  </div>
+                  <div class="clarification-list">
+                    <article v-for="(item, index) in smart.clarification.clarifications" :key="`${item.field}-${index}`">
+                      <div><strong>{{ item.label || "口径确认" }}</strong><p>{{ item.message }}</p></div>
+                      <select v-if="item.field !== 'intent' && item.candidates?.length" v-model="smart.corrections[item.field]">
+                        <option value="">取消这个条件</option>
+                        <option v-for="candidate in item.candidates" :key="candidate" :value="candidate">{{ candidate }}</option>
+                      </select>
+                      <input v-else-if="item.field !== 'intent'" v-model="smart.corrections[item.field]" :placeholder="`修改${item.label || '条件'}，留空则取消`" />
+                    </article>
+                  </div>
+                  <div class="correction-actions">
+                    <button class="ghost" type="button" @click="smart.clarification = null">返回修改问题</button>
+                    <button class="primary" type="button" :disabled="smart.busy" @click="confirmSmartIntent"><CheckCircle2 :size="16" /> 按确认口径继续</button>
+                  </div>
+                </section>
+
+                <section v-if="smart.result" class="panel smart-answer">
+                  <div class="panel-title"><h2>分析结论</h2><span>{{ smart.result.filters.start_time }} 至 {{ smart.result.filters.end_time }}</span></div>
+                  <div class="smart-summary">{{ smart.result.answer }}</div>
+                  <div class="insight-grid">
+                    <article v-for="insight in smart.result.insights" :key="`${insight.kind}-${insight.title}`">
+                      <small>{{ insight.kind.toUpperCase() }}</small>
+                      <strong>{{ insight.title }}</strong>
+                      <p>{{ insight.summary }}</p>
+                    </article>
+                  </div>
+                </section>
+              </div>
             </section>
 
             <section v-if="smart.result" class="chart-grid">
@@ -208,11 +303,11 @@
                 </div>
               </div>
               <div class="panel">
-                <div class="panel-title"><h2>生成 SQL</h2><span>只读聚合查询</span></div>
-                <details class="sql-box" open>
-                  <summary>查看 SQL 与参数</summary>
-                  <pre>{{ smart.result.sql }}</pre>
-                  <pre>{{ JSON.stringify(smart.result.sql_params, null, 2) }}</pre>
+                <div class="panel-title"><h2>技术详情</h2><span>{{ smart.result.queries?.length || 1 }} 个只读聚合查询</span></div>
+                <details v-for="queryPlan in (smart.result.queries || [{ key: 'current', label: '当前周期', sql: smart.result.sql, sql_params: smart.result.sql_params }])" :key="queryPlan.key" class="sql-box">
+                  <summary>{{ queryPlan.label }} · 查看 SQL 与参数</summary>
+                  <pre>{{ queryPlan.sql }}</pre>
+                  <pre>{{ JSON.stringify(queryPlan.sql_params, null, 2) }}</pre>
                 </details>
               </div>
             </section>
@@ -232,6 +327,19 @@
           </section>
 
           <section v-if="view === 'dashboard'">
+            <HomePriority
+              :context="workbenchContext"
+              :summary="dashboard.summary"
+              :exception-summary="exceptionSummary"
+              :latest-report="latestReport"
+              :status="pageError ? 'error' : 'loaded'"
+              :error="pageError"
+              :can-import="can('import')"
+              :can-analytics="can('analytics')"
+              @open="openView"
+              @use-latest="useLatestPeriod"
+              @retry="loadCurrent(true)"
+            />
             <section class="metric-grid dashboard-metrics">
               <article class="metric-card">
                 <div class="metric-head"><span>销售额</span><TrendingUp :size="17" /></div>
@@ -245,7 +353,7 @@
               </article>
               <article class="metric-card">
                 <div class="metric-head"><span>利润率</span><Gauge :size="17" /></div>
-                <strong :class="{ loss: Number(dashboard.summary.profit_rate || 0) < 0 }">{{ Money(dashboard.summary.profit_rate) }}%</strong>
+                <strong :class="{ loss: Number(dashboard.summary.profit_rate || 0) < 0 }">{{ dashboardHasData ? `${Money(dashboard.summary.profit_rate)}%` : '—' }}</strong>
                 <small class="metric-change neutral">收入利润结构</small>
               </article>
               <article class="metric-card">
@@ -255,7 +363,7 @@
               </article>
               <article class="metric-card">
                 <div class="metric-head"><span>客单价</span><BarChart3 :size="17" /></div>
-                <strong>¥ {{ Money(dashboard.summary.avg_order_value) }}</strong>
+                <strong>{{ dashboardHasData ? `¥ ${Money(dashboard.summary.avg_order_value)}` : '—' }}</strong>
                 <small class="metric-change neutral">按去重订单计算</small>
               </article>
               <article class="metric-card">
@@ -315,7 +423,7 @@
                 <div class="panel-title"><h2>数据与风险信号</h2><span>无需额外扫描</span></div>
                 <div class="signal-grid">
                   <article class="signal-card compact"><Database :size="18" /><span>数据截至</span><strong>{{ formatDateTime(dashboard.summary.latest_ship_time) }}</strong></article>
-                  <article class="signal-card" :class="{ loss: Number(dashboard.summary.loss_orders || 0) > 0 }"><AlertTriangle :size="18" /><span>亏损订单</span><strong>{{ dashboard.summary.loss_orders || 0 }}</strong></article>
+                  <article class="signal-card" :class="{ loss: Number(dashboard.summary.loss_orders || 0) > 0 }"><AlertTriangle :size="18" /><span>含亏损明细的订单</span><strong>{{ dashboard.summary.loss_orders || 0 }}</strong></article>
                   <article class="signal-card"><FileSpreadsheet :size="18" /><span>明细行数</span><strong>{{ dashboard.summary.detail_rows || 0 }}</strong></article>
                   <article class="signal-card compact"><CalendarRange :size="18" /><span>对比周期</span><strong>{{ dashboard.comparison.start_time }}<br>{{ dashboard.comparison.end_time }}</strong></article>
                 </div>
@@ -387,8 +495,13 @@
             <section v-if="importDetail" class="panel">
               <div class="panel-title">
                 <h2>{{ importDetail.log.batch_no }}</h2>
-                <button v-if="importDetail.log.status === 'validated' && importDetail.log.fail_rows === 0 && importDetail.log.total_rows > 0" class="primary" :disabled="commitBusy" @click="commitImport(importDetail.log.batch_no)">{{ commitBusy ? '正在入库...' : '确认入库' }}</button>
+                <div class="panel-actions">
+                  <a v-if="Number(importDetail.log.fail_rows || 0) > 0" class="export-btn" :href="`/api/imports/${importDetail.log.batch_no}/errors/export.xlsx`"><Download :size="16" /> 下载完整异常</a>
+                  <button v-if="importDetail.log.status === 'processing'" class="ghost" :disabled="recoverBusy" @click="recoverImport(importDetail.log.batch_no)">{{ recoverBusy ? '检查中…' : '恢复中断任务' }}</button>
+                  <button v-if="importDetail.log.status === 'validated' && importDetail.log.fail_rows === 0 && importDetail.log.total_rows > 0" class="primary" :disabled="commitBusy" @click="commitImport(importDetail.log.batch_no)">{{ commitBusy ? '正在入库...' : '确认入库' }}</button>
+                </div>
               </div>
+              <p v-if="importDetail.log.status === 'processing'" class="import-recovery-note">仅当任务 15 分钟无进度且后台线程已经结束时才能恢复。恢复会将失联批次标为失败，不会取消仍在运行的任务；之后请重新上传文件。</p>
               <table>
                 <thead><tr><th>行号</th><th>订单</th><th>客户</th><th>地址</th><th>产品</th><th>利润</th><th>异常</th><th>提示</th></tr></thead>
                 <tbody>
@@ -497,7 +610,14 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
+import { consumeEventStream, SessionExpiredError } from "./sse.js";
+import ExceptionCenter from "./workbench/ExceptionCenter.vue";
+import HomePriority from "./workbench/HomePriority.vue";
+import ReportsCenter from "./workbench/ReportsCenter.vue";
+import WorkbenchFilters from "./workbench/WorkbenchFilters.vue";
+import { matchingCurrentReport } from "./workbench/contract.js";
+import { createSessionLifecycle, firstAuthorizedView, hasPermission } from "./workbench/state.js";
 import {
   Activity,
   AlertTriangle,
@@ -509,6 +629,7 @@ import {
   CircleAlert,
   Database,
   Download,
+  FileText,
   FileSpreadsheet,
   Gauge,
   LayoutDashboard,
@@ -541,16 +662,19 @@ const loading = ref(false);
 const error = ref("");
 const pageError = ref("");
 const authBusy = ref(false);
-const rangeOpen = ref(false);
 const selectedFile = ref(null);
 const importFileInput = ref(null);
 const importBusy = ref(false);
 const commitBusy = ref(false);
+const recoverBusy = ref(false);
 const uploadProgress = ref(0);
 const importMessage = reactive({ type: "", text: "" });
 const uploadReminderOpen = ref(false);
 const lastLoadedAt = ref(null);
+const workbenchStatus = ref("idle");
+const workbenchRefreshKey = ref(0);
 let activeLoadController = null;
+let activeImportRequest = null;
 let importPollToken = 0;
 const loadedKeys = new Map();
 const me = reactive({ authenticated: false, permissions: [], role_codes: [] });
@@ -564,8 +688,13 @@ const filters = reactive({
   category: "",
   product_classification: "",
   product: "",
-  order_no: ""
+  order_no: "",
+  province: "",
+  city: "",
+  order_source: "",
+  comparison_mode: "previous_period"
 });
+const initialFilters = { ...filters };
 
 const dashboard = reactive({ summary: {}, comparison: {}, trend: { granularity: "month", rows: [] }, platform_rows: [], top_products: [], meta: {} });
 const commerce = reactive({ summary: {}, trend_rows: [], dimension_rows: [], risk_rows: [], dimension: "product", metric: "revenue" });
@@ -575,17 +704,24 @@ const importDetail = ref(null);
 const products = reactive({ rows: [], category_rows: [] });
 const shops = reactive({ rows: [] });
 const settings = reactive({ users: [], roles: [] });
+const workbenchContext = reactive({ latest_period: null, latest_data_at: null, rules: {}, rules_version: "", catalogs: {} });
+const exceptionSummary = reactive({ total: 0, pending: 0, confirmed: 0, dismissed: 0, by_rule: [], impact_note: "" });
+const latestReport = ref(null);
 const smart = reactive({
   question: "今年1-5月各产品销售额占比，按销售额排序",
   result: null,
   busy: false,
-  error: ""
+  error: "",
+  steps: [],
+  clarification: null,
+  corrections: {}
 });
+let smartController = null;
 const smartExamples = [
-  "今年1-5月各产品销售额占比",
-  "今年1-5月各店铺利润排名",
-  "今年1-5月按月销售额趋势",
-  "今年1-5月各平台订单数和销售额"
+  "看抖音平台华东区域女装今年上半年的销售额、利润率和月度趋势",
+  "今年各店铺比去年同期增长多少，哪些产品造成了下滑",
+  "最近哪些产品在拖累利润，原因是什么，应该优先处理什么",
+  "今年1-5月各产品销售额占比"
 ];
 const commerceDimensions = [
   { key: "product", label: "产品" },
@@ -604,18 +740,32 @@ const commerceMetrics = [
 ];
 
 const nav = [
-  { key: "dashboard", label: "数据总览", meta: "DATA CENTER OVERVIEW", icon: LayoutDashboard, permission: "view" },
-  { key: "commerce", label: "多维驾驶舱", meta: "ECOMMERCE COMMAND", icon: BarChart3, permission: "analytics" },
-  { key: "orders", label: "订单明细", meta: "ORDER LEDGER", icon: ShoppingBag, permission: "view" },
-  { key: "products", label: "产品分析", meta: "PRODUCT INTELLIGENCE", icon: LineChart, permission: "analytics" },
-  { key: "shops", label: "店铺平台", meta: "CHANNEL PERFORMANCE", icon: Building2, permission: "analytics" },
-  { key: "smart", label: "智能分析", meta: "NATURAL LANGUAGE SQL", icon: Sparkles, permission: "analytics" },
+  { key: "dashboard", label: "经营概览", meta: "OPERATIONS OVERVIEW", icon: LayoutDashboard, permission: "view" },
+  { key: "exceptions", label: "异常中心", meta: "EXCEPTION REVIEW", icon: AlertTriangle, permission: ["analytics", "import"] },
+  { key: "reports", label: "分析报告", meta: "REPORT LIBRARY", icon: FileText, permission: "analytics" },
+  { key: "commerce", label: "专题 · 多维经营", meta: "ECOMMERCE TOPIC", icon: BarChart3, permission: "analytics" },
+  { key: "products", label: "专题 · 产品", meta: "PRODUCT TOPIC", icon: LineChart, permission: "analytics" },
+  { key: "shops", label: "专题 · 店铺", meta: "CHANNEL TOPIC", icon: Building2, permission: "analytics" },
+  { key: "smart", label: "辅助 · 智能分析", meta: "ANALYSIS ASSISTANT", icon: Sparkles, permission: "analytics" },
   { key: "imports", label: "数据导入", meta: "IMPORT CONTROL", icon: FileSpreadsheet, permission: "import" },
   { key: "settings", label: "权限配置", meta: "ACCESS GOVERNANCE", icon: Settings, permission: "settings" }
 ];
-const can = (permission) => me.permissions?.includes("admin") || me.permissions?.includes(permission);
+const can = (permission) => hasPermission(me.permissions || [], permission);
 const visibleNav = computed(() => nav.filter((item) => can(item.permission)));
 const currentNav = computed(() => nav.find((item) => item.key === view.value));
+const filterFields = computed(() => {
+  const base = ["dept", "platform", "shop_name", "province", "city", "order_source"];
+  return ["commerce", "products", "exceptions", "reports"].includes(view.value)
+    ? [...base, "category", "product_classification", "product"]
+    : base;
+});
+const dashboardHasData = computed(() => Number(dashboard.summary.detail_rows || 0) > 0 || Number(dashboard.summary.orders || 0) > 0);
+const currentLoadStatus = computed(() => loading.value
+  ? "loading"
+  : ["exceptions", "reports"].includes(view.value)
+    ? workbenchStatus.value
+    : pageError.value ? "error" : lastLoadedAt.value ? "loaded" : "idle");
+const currentLoadStatusLabel = computed(() => ({ loading: "正在更新", stale: "显示旧结果", error: "加载异常", loaded: "数据已就绪", idle: "等待查询" })[currentLoadStatus.value] || "等待查询");
 const scopeSummary = computed(() => {
   if (Object.values(me.all_scopes || {}).every(Boolean)) return "全域授权";
   const scopes = me.scopes || {};
@@ -632,6 +782,66 @@ const maxCommerceTrendRevenue = computed(() => Math.max(...commerce.trend_rows.m
 const maxCommerceRankValue = computed(() => Math.max(...commerce.dimension_rows.map((row) => Math.abs(Number(row[commerce.metric] || 0))), 1));
 const currentCommerceDimension = computed(() => commerceDimensions.find((item) => item.key === commerce.dimension) || commerceDimensions[0]);
 const currentCommerceMetric = computed(() => commerceMetrics.find((item) => item.key === commerce.metric) || commerceMetrics[0]);
+const smartDimensionOptions = [
+  { key: "month", label: "月份" },
+  { key: "product", label: "产品" },
+  { key: "category", label: "产品大类" },
+  { key: "product_classification", label: "货品分类" },
+  { key: "platform", label: "平台" },
+  { key: "shop", label: "店铺" },
+  { key: "dept", label: "部门" },
+  { key: "province", label: "省份" },
+  { key: "city", label: "城市" },
+  { key: "order_source", label: "订单来源" }
+];
+const smartMetricOptions = [
+  { key: "revenue", label: "销售额" },
+  { key: "profit", label: "利润" },
+  { key: "profit_rate", label: "利润率" },
+  { key: "qty", label: "销量" },
+  { key: "orders", label: "订单数" },
+  { key: "cost", label: "成本" }
+];
+const smartAnalysisTypes = [
+  { key: "ranking", label: "排行" },
+  { key: "trend", label: "趋势" },
+  { key: "share", label: "占比" },
+  { key: "comparison", label: "周期对比" },
+  { key: "contribution", label: "贡献拆解" },
+  { key: "diagnosis", label: "诊断建议" }
+];
+const smartStageDefinitions = [
+  { key: "understanding", title: "理解问题", idle: "等待识别分析目标" },
+  { key: "resolving", title: "解析业务条件", idle: "等待匹配真实业务值" },
+  { key: "authorizing", title: "校验权限", idle: "等待叠加数据范围" },
+  { key: "planning", title: "生成查询计划", idle: "等待安全审计" },
+  { key: "querying", title: "读取数据", idle: "等待执行聚合查询" },
+  { key: "synthesizing", title: "形成结论", idle: "等待整理发现与建议" }
+];
+const smartIntent = computed(() => smart.result?.intent || smart.clarification?.intent || null);
+const smartStageRows = computed(() => smartStageDefinitions.map((definition) => {
+  const matches = smart.steps.filter((step) => step.stage === definition.key);
+  const latest = matches[matches.length - 1];
+  return latest || { ...definition, status: "pending", summary: definition.idle, elapsed_ms: null };
+}));
+const smartIntentChips = computed(() => {
+  const intent = smartIntent.value;
+  if (!intent) return [];
+  const chips = [];
+  const range = intent.time_range || {};
+  if (range.start_time && range.end_time) chips.push({ tone: "time", text: `${range.start_time} — ${range.end_time}` });
+  if (intent.comparison?.mode && intent.comparison.mode !== "none") chips.push({ tone: "compare", text: intent.comparison.label || "周期对比" });
+  Object.entries(intent.filters || {}).forEach(([key, value]) => {
+    if (value) chips.push({ tone: "filter", text: `${smartFilterLabel(key)}：${value}` });
+  });
+  (intent.dimensions || []).forEach((key) => chips.push({ tone: "dimension", text: `维度：${smartDimensionLabel(key)}` }));
+  (intent.metrics || []).forEach((key) => chips.push({ tone: "metric", text: `指标：${smartMetricLabel(key)}` }));
+  chips.push({
+    tone: "limit",
+    text: intent.analysis_type === "trend" ? `最多 ${intent.limit || 36} 个数据点` : `Top ${intent.limit || 10}`
+  });
+  return chips;
+});
 const smartColumns = computed(() => smart.result?.rows?.length ? Object.keys(smart.result.rows[0]) : []);
 const smartMaxValue = computed(() => Math.max(...(smart.result?.chart?.points || []).map((point) => Math.abs(Number(point.value || 0))), 1));
 const chartColors = ["#45e0c1", "#8de074", "#e7b85f", "#6ba8ff", "#ef6a6a", "#a98be8", "#74c8d8", "#d6dc73", "#df8f5d", "#cf77b8", "#91a9dd", "#5dc490"];
@@ -686,6 +896,58 @@ const presets = [
   ["quarter", "本季度"], ["firstHalf", "上半年"], ["secondHalf", "下半年"], ["lastYear", "近一年"], ["thisYear", "今年"]
 ];
 
+function clearStreams() {
+  importPollToken += 1;
+  activeLoadController?.abort();
+  activeLoadController = null;
+  smartController?.abort();
+  smartController = null;
+  activeImportRequest?.abort();
+  activeImportRequest = null;
+}
+
+function clearBusinessData() {
+  Object.assign(filters, initialFilters);
+  Object.assign(dashboard, { summary: {}, comparison: {}, trend: { granularity: "month", rows: [] }, platform_rows: [], top_products: [], meta: {} });
+  Object.assign(commerce, { summary: {}, trend_rows: [], dimension_rows: [], risk_rows: [], dimension: "product", metric: "revenue" });
+  Object.assign(orders, { rows: [] });
+  Object.assign(imports, { logs: [] });
+  Object.assign(products, { rows: [], category_rows: [] });
+  Object.assign(shops, { rows: [] });
+  Object.assign(settings, { users: [], roles: [] });
+  Object.assign(workbenchContext, { latest_period: null, latest_data_at: null, rules: {}, rules_version: "", catalogs: {} });
+  Object.assign(exceptionSummary, { total: 0, pending: 0, confirmed: 0, dismissed: 0, by_rule: [], impact_note: "" });
+  latestReport.value = null;
+  importDetail.value = null;
+  selectedFile.value = null;
+  uploadProgress.value = 0;
+  importMessage.type = "";
+  importMessage.text = "";
+  uploadReminderOpen.value = false;
+  Object.assign(smart, { question: "", result: null, busy: false, error: "", steps: [], clarification: null, corrections: {} });
+  importBusy.value = false;
+  commitBusy.value = false;
+  recoverBusy.value = false;
+  lastLoadedAt.value = null;
+  workbenchStatus.value = "idle";
+  pageError.value = "";
+  loading.value = false;
+}
+
+const sessionLifecycle = createSessionLifecycle({
+  cache: loadedKeys,
+  clearStreams,
+  clearCredentials: () => { loginForm.password = ""; },
+  clearBusinessData
+});
+
+function expireSession(message = "登录已失效，请重新登录。") {
+  sessionLifecycle.logout();
+  Object.assign(me, { authenticated: false, username: "", display_name: "", permissions: [], role_codes: [], scopes: {}, all_scopes: {} });
+  error.value = message;
+  view.value = "dashboard";
+}
+
 function query() {
   return new URLSearchParams(Object.fromEntries(Object.entries(filters).filter(([, v]) => v))).toString();
 }
@@ -698,12 +960,19 @@ function commerceQuery() {
 }
 
 async function api(path, options = {}) {
+  const sessionToken = sessionLifecycle.capture();
   const response = await fetch(path, { credentials: "same-origin", ...options });
   const contentType = response.headers.get("content-type") || "";
   const body = contentType.includes("application/json") ? await response.json() : {};
+  if (!sessionLifecycle.isCurrent(sessionToken)) {
+    const staleError = new Error("旧会话请求已取消");
+    staleError.name = "AbortError";
+    throw staleError;
+  }
   if (!response.ok) {
     if (response.status === 401 && path !== "/api/me") {
-      Object.assign(me, { authenticated: false, permissions: [], role_codes: [] });
+      expireSession(body.detail || "登录已失效，请重新登录。");
+      throw new SessionExpiredError(body.detail || "登录已失效，请重新登录。");
     }
     throw new Error(body.detail || `请求失败（${response.status}）`);
   }
@@ -723,29 +992,33 @@ async function login() {
   form.append("password", loginForm.password);
   try {
     const data = await api("/api/login", { method: "POST", body: form });
+    sessionLifecycle.startSession();
     Object.assign(me, data);
-    loadedKeys.clear();
+    const requested = window.location.hash.slice(1);
+    view.value = firstAuthorizedView(nav, me.permissions, requested || "dashboard");
+    window.history.replaceState({ view: view.value }, "", `#${view.value}`);
     await loadCurrent(true);
   } catch (err) {
     error.value = err.message;
   } finally {
+    loginForm.password = "";
     authBusy.value = false;
   }
 }
 
 async function logout() {
-  importPollToken += 1;
-  activeLoadController?.abort();
   try {
     await api("/api/logout", { method: "POST" });
   } finally {
-    loadedKeys.clear();
-    Object.assign(me, { authenticated: false, permissions: [], role_codes: [], scopes: {}, all_scopes: {} });
+    sessionLifecycle.logout();
+    Object.assign(me, { authenticated: false, username: "", display_name: "", permissions: [], role_codes: [], scopes: {}, all_scopes: {} });
+    view.value = "dashboard";
+    window.history.replaceState({ view: "dashboard" }, "", "#dashboard");
   }
 }
 
 function currentLoadKey(targetView = view.value) {
-  const base = ["dashboard", "commerce", "orders", "products", "shops"].includes(targetView) ? query() : "";
+  const base = ["dashboard", "exceptions", "reports", "commerce", "orders", "products", "shops"].includes(targetView) ? query() : "";
   const commerceState = targetView === "commerce" ? `:${commerce.dimension}:${commerce.metric}` : "";
   return `${targetView}:${base}${commerceState}`;
 }
@@ -753,6 +1026,7 @@ function currentLoadKey(targetView = view.value) {
 async function loadCurrent(force = false) {
   if (!me.authenticated) return;
   const targetView = view.value;
+  if (force && ["exceptions", "reports"].includes(targetView)) workbenchRefreshKey.value += 1;
   if (targetView === "smart") return;
   const loadKey = currentLoadKey(targetView);
   if (!force && loadedKeys.get(targetView) === loadKey) return;
@@ -763,7 +1037,23 @@ async function loadCurrent(force = false) {
   pageError.value = "";
   try {
     const requestOptions = { signal: controller.signal };
-    if (targetView === "dashboard") Object.assign(dashboard, await api(`/api/dashboard?${query()}`, requestOptions));
+    if (["dashboard", "exceptions", "reports"].includes(targetView) && can("view")) {
+      Object.assign(workbenchContext, await api(`/api/workbench/context?${query()}`, requestOptions));
+    }
+    if (targetView === "dashboard") {
+      const requests = [api(`/api/dashboard?${query()}`, requestOptions)];
+      if (can("analytics")) {
+        requests.push(api(`/api/exceptions?${query()}&type=operating&page=1&page_size=1`, requestOptions));
+        requests.push(api("/api/reports", requestOptions));
+      }
+      const [dashboardData, exceptionData, reportData] = await Promise.all(requests);
+      Object.assign(dashboard, dashboardData);
+      if (exceptionData) Object.assign(exceptionSummary, exceptionData.summary || {});
+      if (reportData) latestReport.value = matchingCurrentReport(reportData.reports || [], filters, {
+        dataVersion: exceptionData?.data_version,
+        rulesVersion: workbenchContext.rules_version
+      });
+    }
     if (targetView === "commerce") {
       const data = await api(`/api/analytics/commerce-dashboard?${commerceQuery()}`, requestOptions);
       commerce.summary = data.summary || {};
@@ -786,7 +1076,7 @@ async function loadCurrent(force = false) {
     loadedKeys.set(targetView, loadKey);
     lastLoadedAt.value = new Date();
   } catch (err) {
-    if (err.name !== "AbortError") pageError.value = err.message || "数据加载失败";
+    if (err.name !== "AbortError" && !(err instanceof SessionExpiredError)) pageError.value = err.message || "数据加载失败";
   } finally {
     if (activeLoadController === controller) {
       loading.value = false;
@@ -933,21 +1223,173 @@ function formatSmartCell(value, key) {
   return value;
 }
 
-async function askSmart() {
+function smartFilterLabel(key) {
+  const labels = {
+    dept: "部门",
+    platform: "平台",
+    shop_name: "店铺",
+    category: "产品大类",
+    product_classification: "货品分类",
+    product: "产品",
+    order_no: "订单号",
+    province: "省份",
+    city: "城市",
+    order_source: "订单来源"
+  };
+  return labels[key] || key;
+}
+
+function applyWorkbenchFilters(next) {
+  Object.assign(filters, next);
+  loadCurrent(true);
+}
+
+function useLatestPeriod() {
+  if (!workbenchContext.latest_period) return;
+  filters.start_time = workbenchContext.latest_period.start_time;
+  filters.end_time = workbenchContext.latest_period.end_time;
+  loadCurrent(true);
+}
+
+function smartDimensionLabel(key) {
+  return smartDimensionOptions.find((item) => item.key === key)?.label || key;
+}
+
+function smartMetricLabel(key) {
+  return smartMetricOptions.find((item) => item.key === key)?.label || key;
+}
+
+function smartAnalysisTypeLabel(key) {
+  return smartAnalysisTypes.find((item) => item.key === key)?.label || key;
+}
+
+function smartParserLabel(source) {
+  if (source === "ark") return "ARK 智能解析";
+  if (source === "confirmed") return "人工确认口径";
+  return "规则降级模式";
+}
+
+function formatSmartElapsed(value) {
+  if (value === null || value === undefined) return "";
+  return value >= 1000 ? `${(value / 1000).toFixed(1)}s` : `${Math.round(value)}ms`;
+}
+
+function setSmartProgress(step) {
+  const index = smart.steps.findIndex((item) => item.stage === step.stage);
+  if (index >= 0) smart.steps.splice(index, 1, step);
+  else smart.steps.push(step);
+}
+
+function cloneSmartIntent(intent) {
+  return JSON.parse(JSON.stringify(intent || {}));
+}
+
+function prepareSmartCorrections(payload) {
+  const intent = payload?.intent || {};
+  smart.corrections = {
+    _start_time: intent.time_range?.start_time || "",
+    _end_time: intent.time_range?.end_time || "",
+    _analysis_type: intent.analysis_type || "ranking",
+    _dimension: intent.dimensions?.[0] || "product",
+    _metric: intent.order_metric || intent.metrics?.[0] || "revenue",
+    _limit: intent.limit || 10
+  };
+  for (const item of payload?.clarifications || []) {
+    if (item.field && item.field !== "intent") {
+      smart.corrections[item.field] = intent.filters?.[item.field] || item.value || "";
+    }
+  }
+}
+
+function openSmartIntentReview() {
+  if (!smart.result?.intent) return;
+  smart.clarification = {
+    intent: cloneSmartIntent(smart.result.intent),
+    filters: { ...smart.result.filters },
+    clarifications: [{
+      field: "intent",
+      label: "调整分析口径",
+      message: "修改下列核心口径后，系统会重新校验权限并执行分析。",
+      candidates: []
+    }],
+    warnings: smart.result.warnings || [],
+    parser_source: smart.result.parser_source,
+    trace: smart.result.trace || []
+  };
+  prepareSmartCorrections(smart.clarification);
+}
+
+async function confirmSmartIntent() {
+  const intent = cloneSmartIntent(smart.clarification?.intent);
+  if (!intent.time_range) intent.time_range = {};
+  intent.time_range.start_time = smart.corrections._start_time;
+  intent.time_range.end_time = smart.corrections._end_time;
+  intent.analysis_type = smart.corrections._analysis_type;
+  const remainingDimensions = (intent.dimensions || []).filter((key) => key !== smart.corrections._dimension);
+  intent.dimensions = [smart.corrections._dimension, ...remainingDimensions].slice(0, 3);
+  intent.order_metric = smart.corrections._metric;
+  intent.metrics = [smart.corrections._metric, ...(intent.metrics || []).filter((key) => key !== smart.corrections._metric)].slice(0, 5);
+  intent.limit = Math.max(1, Math.min(50, Number(smart.corrections._limit || 10)));
+  intent.confidence = 1;
+  intent.clarifications = [];
+  intent.filters = { ...(intent.filters || {}) };
+  intent.filter_hints = { ...(intent.filter_hints || {}) };
+  for (const item of smart.clarification?.clarifications || []) {
+    if (!item.field || item.field === "intent") continue;
+    const value = `${smart.corrections[item.field] || ""}`.trim();
+    intent.filters[item.field] = value;
+    intent.filter_hints[item.field] = value;
+  }
+  await askSmart(intent);
+}
+
+async function askSmart(confirmedIntent = null) {
   smart.error = "";
   if (!smart.question.trim()) {
     smart.error = "请输入要分析的问题";
     return;
   }
+  smartController?.abort();
+  smartController = new AbortController();
   smart.busy = true;
+  smart.result = null;
+  smart.clarification = null;
+  smart.steps = [];
   try {
-    smart.result = await api("/api/analytics/ask", {
+    const payload = { question: smart.question };
+    if (confirmedIntent) payload.confirmed_intent = confirmedIntent;
+    const response = await fetch("/api/analytics/stream", {
       method: "POST",
+      credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question: smart.question })
+      body: JSON.stringify(payload),
+      signal: smartController.signal
+    });
+    await consumeEventStream(response, async (event, data) => {
+      if (event === "progress") {
+        setSmartProgress(data);
+        return;
+      }
+      if (event === "clarification") {
+        smart.clarification = data;
+        if (Array.isArray(data.trace)) smart.steps = data.trace;
+        prepareSmartCorrections(data);
+        return;
+      }
+      if (event === "result") {
+        smart.result = data.result;
+        smart.clarification = null;
+        if (Array.isArray(data.result?.trace)) smart.steps = data.result.trace;
+        return;
+      }
+      if (event === "error") {
+        if (Array.isArray(data.trace)) smart.steps = data.trace;
+        throw new Error(data.message || "智能分析失败");
+      }
     });
   } catch (err) {
-    smart.error = err.message;
+    if (err instanceof SessionExpiredError || err.status === 401) expireSession(err.message);
+    else if (err.name !== "AbortError") smart.error = err.message;
   } finally {
     smart.busy = false;
   }
@@ -956,6 +1398,10 @@ async function askSmart() {
 async function openView(key, updateHistory = true) {
   if (!visibleNav.value.some((item) => item.key === key)) return;
   if (key !== "imports") importPollToken += 1;
+  if (key !== "smart" && smart.busy) {
+    smartController?.abort();
+    smart.busy = false;
+  }
   activeLoadController?.abort();
   view.value = key;
   importDetail.value = null;
@@ -970,6 +1416,7 @@ function exportOrders() {
 }
 
 async function uploadFile(file) {
+  const sessionToken = sessionLifecycle.capture();
   importMessage.text = "";
   importMessage.type = "";
   importBusy.value = true;
@@ -978,17 +1425,21 @@ async function uploadFile(file) {
     importMessage.type = "notice";
     importMessage.text = "正在上传：0%";
     const data = await uploadImportFile(file);
+    if (!sessionLifecycle.isCurrent(sessionToken)) return;
     selectedFile.value = null;
     if (importFileInput.value) importFileInput.value.value = "";
     importMessage.type = "notice";
     importMessage.text = "文件已上传，系统正在后台解析校验。";
     await openImport(data.batch_no);
+    if (!sessionLifecycle.isCurrent(sessionToken)) return;
     await pollImport(data.batch_no);
   } catch (err) {
-    showImportError(err.message);
+    if (sessionLifecycle.isCurrent(sessionToken) && err.name !== "AbortError" && !(err instanceof SessionExpiredError)) showImportError(err.message);
   } finally {
-    importBusy.value = false;
-    uploadProgress.value = 0;
+    if (sessionLifecycle.isCurrent(sessionToken)) {
+      importBusy.value = false;
+      uploadProgress.value = 0;
+    }
   }
 }
 
@@ -1019,13 +1470,16 @@ function openPendingImport() {
 }
 
 function uploadImportFile(file) {
+  const sessionToken = sessionLifecycle.capture();
   return new Promise((resolve, reject) => {
     const form = new FormData();
     form.append("file", file);
     const xhr = new XMLHttpRequest();
+    activeImportRequest = xhr;
     xhr.open("POST", "/api/imports/upload", true);
     xhr.withCredentials = true;
     xhr.upload.onprogress = (event) => {
+      if (!sessionLifecycle.isCurrent(sessionToken)) return;
       if (!event.lengthComputable) {
         importMessage.text = "正在上传文件...";
         return;
@@ -1035,6 +1489,13 @@ function uploadImportFile(file) {
       importMessage.text = `正在上传：${uploadProgress.value}%`;
     };
     xhr.onload = () => {
+      if (activeImportRequest === xhr) activeImportRequest = null;
+      if (!sessionLifecycle.isCurrent(sessionToken)) {
+        const staleError = new Error("旧会话上传已取消");
+        staleError.name = "AbortError";
+        reject(staleError);
+        return;
+      }
       let body = {};
       try {
         body = xhr.responseText ? JSON.parse(xhr.responseText) : {};
@@ -1042,13 +1503,27 @@ function uploadImportFile(file) {
         reject(new Error("上传响应解析失败"));
         return;
       }
-      if (xhr.status >= 200 && xhr.status < 300) {
+      if (xhr.status === 401) {
+        expireSession(body.detail || "登录已失效，请重新登录。");
+        reject(new SessionExpiredError(body.detail || "登录已失效，请重新登录。"));
+      } else if (xhr.status >= 200 && xhr.status < 300) {
         resolve(body.data ?? body);
       } else {
         reject(new Error(body.detail || "上传失败"));
       }
     };
-    xhr.onerror = () => reject(new Error("上传网络异常，请稍后重试。"));
+    xhr.onerror = () => {
+      if (activeImportRequest === xhr) activeImportRequest = null;
+      const requestError = new Error(sessionLifecycle.isCurrent(sessionToken) ? "上传网络异常，请稍后重试。" : "旧会话上传已取消");
+      if (!sessionLifecycle.isCurrent(sessionToken)) requestError.name = "AbortError";
+      reject(requestError);
+    };
+    xhr.onabort = () => {
+      if (activeImportRequest === xhr) activeImportRequest = null;
+      const abortError = new Error("上传已取消");
+      abortError.name = "AbortError";
+      reject(abortError);
+    };
     xhr.send(form);
   });
 }
@@ -1103,17 +1578,36 @@ async function pollImport(batchNo) {
 
 async function commitImport(batchNo) {
   if (!window.confirm("确认将该批次写入正式订单？提交过程具备幂等保护，但业务数据入库后不提供物理删除。")) return;
+  const sessionToken = sessionLifecycle.capture();
   commitBusy.value = true;
   pageError.value = "";
   try {
     await api(`/api/imports/${batchNo}/commit`, { method: "POST" });
+    sessionLifecycle.importSucceeded();
     await openImport(batchNo);
     Object.assign(imports, await api("/api/imports"));
     loadedKeys.delete("imports");
   } catch (err) {
-    pageError.value = err.message || "批次入库失败";
+    if (sessionLifecycle.isCurrent(sessionToken) && err.name !== "AbortError" && !(err instanceof SessionExpiredError)) pageError.value = err.message || "批次入库失败";
   } finally {
-    commitBusy.value = false;
+    if (sessionLifecycle.isCurrent(sessionToken)) commitBusy.value = false;
+  }
+}
+
+async function recoverImport(batchNo) {
+  const sessionToken = sessionLifecycle.capture();
+  recoverBusy.value = true;
+  pageError.value = "";
+  try {
+    await api(`/api/imports/${batchNo}/recover`, { method: "POST" });
+    importMessage.type = "notice";
+    importMessage.text = "失联任务已标记为失败，请重新上传原文件。";
+    await openImport(batchNo);
+    Object.assign(imports, await api("/api/imports"));
+  } catch (err) {
+    if (sessionLifecycle.isCurrent(sessionToken) && err.name !== "AbortError" && !(err instanceof SessionExpiredError)) pageError.value = err.message || "暂时无法恢复该任务";
+  } finally {
+    if (sessionLifecycle.isCurrent(sessionToken)) recoverBusy.value = false;
   }
 }
 
@@ -1129,26 +1623,35 @@ async function saveRole(role) {
     settings.roles = data.roles;
     loadedKeys.delete("settings");
   } catch (err) {
-    pageError.value = err.message || "权限范围保存失败";
+    if (err.name !== "AbortError" && !(err instanceof SessionExpiredError)) pageError.value = err.message || "权限范围保存失败";
   }
 }
 
+function handlePopState() {
+  const target = window.location.hash.slice(1) || "dashboard";
+  const authorized = firstAuthorizedView(nav, me.permissions, target);
+  if (authorized) openView(authorized, false);
+}
+
 onMounted(async () => {
+  window.addEventListener("popstate", handlePopState);
   try {
     await refreshMe();
     if (me.authenticated) {
+      sessionLifecycle.startSession();
       const requestedView = window.location.hash.slice(1);
-      if (visibleNav.value.some((item) => item.key === requestedView)) view.value = requestedView;
-      else window.history.replaceState({ view: view.value }, "", `#${view.value}`);
-      window.addEventListener("popstate", () => {
-        const target = window.location.hash.slice(1) || "dashboard";
-        openView(target, false);
-      });
+      view.value = firstAuthorizedView(nav, me.permissions, requestedView || "dashboard");
+      window.history.replaceState({ view: view.value }, "", `#${view.value}`);
       await loadCurrent(true);
     }
   } catch (err) {
     pageError.value = err.message || "系统初始化失败";
   }
+});
+
+onUnmounted(() => {
+  window.removeEventListener("popstate", handlePopState);
+  clearStreams();
 });
 
 </script>

@@ -11,6 +11,7 @@ from app.config import settings  # noqa: E402
 from app.analytics_aggregates import create_dashboard_tables, create_product_monthly_table  # noqa: E402
 from app.db import connection, parse_database_url  # noqa: E402
 from app.security import hash_password  # noqa: E402
+from scripts.migrate_anomaly_workbench import migrate as migrate_workbench  # noqa: E402
 
 
 def month_iter(start_year: int, end_year: int):
@@ -308,6 +309,7 @@ def main() -> None:
     with connection() as conn:
         create_product_monthly_table(conn)
         create_dashboard_tables(conn)
+        migrate_workbench(conn)
     seed_data()
     cfg = parse_database_url()
     print(f"Initialized database `{cfg.database}`.")

@@ -11,6 +11,25 @@ PRODUCT_MONTHLY_TABLE = "agg_product_monthly"
 DASHBOARD_MONTHLY_TABLE = "agg_dashboard_monthly"
 DASHBOARD_DAILY_TABLE = "agg_dashboard_daily"
 PLATFORM_MONTHLY_TABLE = "agg_platform_monthly"
+PRODUCT_MONTHLY_UNSUPPORTED_FILTERS = (
+    "product",
+    "order_no",
+    "province",
+    "city",
+    "order_source",
+)
+GLOBAL_MONTHLY_UNSUPPORTED_FILTERS = (
+    "dept",
+    "platform",
+    "shop_name",
+    "category",
+    "product_classification",
+    "product",
+    "order_no",
+    "province",
+    "city",
+    "order_source",
+)
 
 
 def create_product_monthly_table(conn) -> None:
@@ -257,13 +276,15 @@ def full_calendar_month_range(filters: dict[str, Any]) -> tuple[date, date] | No
         end = datetime.strptime(str(filters["end_time"]), "%Y-%m-%d").date()
     except (KeyError, TypeError, ValueError):
         return None
-    if start.day != 1 or end.day != monthrange(end.year, end.month)[1]:
+    if end < start or start.day != 1 or end.day != monthrange(end.year, end.month)[1]:
         return None
     return start, end.replace(day=1)
 
 
 def can_use_product_monthly(filters: dict[str, Any]) -> bool:
-    return full_calendar_month_range(filters) is not None and not filters.get("order_no")
+    return full_calendar_month_range(filters) is not None and not any(
+        filters.get(key) for key in PRODUCT_MONTHLY_UNSUPPORTED_FILTERS
+    )
 
 
 def can_use_global_monthly(user: dict[str, Any], filters: dict[str, Any]) -> bool:
@@ -272,18 +293,7 @@ def can_use_global_monthly(user: dict[str, Any], filters: dict[str, Any]) -> boo
         return False
     if not all(user.get("all_scopes", {}).get(key) for key in ("dept", "platform", "shop")):
         return False
-    return not any(
-        filters.get(key)
-        for key in (
-            "dept",
-            "platform",
-            "shop_name",
-            "category",
-            "product_classification",
-            "product",
-            "order_no",
-        )
-    )
+    return not any(filters.get(key) for key in GLOBAL_MONTHLY_UNSUPPORTED_FILTERS)
 
 
 def product_monthly_where(

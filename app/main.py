@@ -10,6 +10,7 @@ import logging
 import tempfile
 import time
 import asyncio
+import uuid
 from collections import defaultdict, deque
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -34,13 +35,28 @@ from app.analytics_aggregates import (
     refresh_dashboard_months,
     refresh_product_months,
 )
-from app.ark_analytics import ark_analytics_enabled, parse_analytics_intent
+from app.ark_analytics import ark_analytics_enabled, parse_analytics_intent, synthesize_analytics_answer
 from app.ark_coding import ArkCodingError, ask_coding_plan, coding_chat_enabled
 from app.db import connection
 from app.import_service import HEADER_MAP, ImportParseResult, iter_excel_rows, new_batch_no, parse_excel
-from app.nl_analytics import audit_sql_plan, build_chart, build_sql, normalize_rows, parse_question_filters, summarize_answer
+from app.nl_analytics import (
+    ENTITY_FILTER_KEYS,
+    audit_sql_plan,
+    build_chart,
+    build_rule_intent,
+    build_sql,
+    build_structured_insights,
+    collapse_filtered_dimensions,
+    comparison_rows,
+    normalize_analysis_intent_v2,
+    normalize_rows,
+    resolve_filter_entities,
+    summarize_insights,
+)
 from app.permissions import has_permission, load_user_context, requested_scope_filters, scope_clause
 from app.security import verify_password
+from app.analysis_periods import comparison_period
+from app.import_access import import_batch_access_clause, require_import_batch, row_in_scope
 
 
 settings.validate_for_runtime()
@@ -272,6 +288,10 @@ def default_filters(request: Request) -> dict[str, Any]:
         "product_classification": request.query_params.get("product_classification", ""),
         "product": request.query_params.get("product", ""),
         "order_no": request.query_params.get("order_no", ""),
+        "province": request.query_params.get("province", ""),
+        "city": request.query_params.get("city", ""),
+        "order_source": request.query_params.get("order_source", ""),
+        "comparison_mode": request.query_params.get("comparison_mode", "previous_period"),
     }
 
 
@@ -281,17 +301,17 @@ def order_where(
     alias: str = "o",
     *,
     validate_dates: bool = True,
+    include_dates: bool = True,
 ) -> tuple[str, dict[str, Any]]:
-    if validate_dates:
+    if validate_dates and include_dates:
         validate_date_filters(filters)
     params = dict(filters)
-    params["end_time_exclusive"] = (
-        datetime.strptime(filters["end_time"], "%Y-%m-%d").date() + timedelta(days=1)
-    ).isoformat()
-    clauses = [
-        f"{alias}.ship_time >= %(start_time)s",
-        f"{alias}.ship_time < %(end_time_exclusive)s",
-    ]
+    clauses = ["1 = 1"]
+    if include_dates:
+        params["end_time_exclusive"] = (
+            datetime.strptime(filters["end_time"], "%Y-%m-%d").date() + timedelta(days=1)
+        ).isoformat()
+        clauses.extend([f"{alias}.ship_time >= %(start_time)s", f"{alias}.ship_time < %(end_time_exclusive)s"])
     if filters.get("category"):
         clauses.append(f"{alias}.category = %(category)s")
     if filters.get("product_classification"):
@@ -302,6 +322,9 @@ def order_where(
     if filters.get("order_no"):
         clauses.append(f"{alias}.order_no LIKE %(order_no_like)s")
         params["order_no_like"] = f"%{filters['order_no']}%"
+    for key, field in (("province", "province"), ("city", "city"), ("order_source", "order_source")):
+        if filters.get(key):
+            clauses.append(f"{alias}.{field} = %({key})s")
     scope_filter, params = requested_scope_filters(params, alias)
     where = " WHERE " + " AND ".join(clauses) + scope_filter + scope_clause(user, params, alias)
     return where, params
@@ -400,7 +423,11 @@ def attach_exact_product_counts(
 
 
 def mask_sensitive_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    from app.anomaly_engine import visible_diagnostic
     for row in rows:
+        for field in ("error_message", "warning_message"):
+            if field in row:
+                row[field] = visible_diagnostic(row[field])
         if "receiver_name" in row:
             row["receiver_name"] = mask_name(row.get("receiver_name"))
         if "receiver_phone" in row:
@@ -410,29 +437,313 @@ def mask_sensitive_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
-async def build_analysis_plan(user: dict[str, Any], body: dict[str, Any]) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any]]:
+def validate_analysis_question(body: dict[str, Any]) -> str:
     question = str(body.get("question") or "").strip()
     if not question:
         raise HTTPException(status_code=400, detail="请输入要分析的问题")
     if len(question) > 500:
         raise HTTPException(status_code=400, detail="问题长度不能超过 500 字")
+    return question
 
-    filters = parse_question_filters(question)
+
+def analysis_filters_from_intent(intent: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
+    time_range = intent["time_range"]
+    filters = {
+        "start_time": time_range["start_time"],
+        "end_time": time_range["end_time"],
+        "dept": "",
+        "platform": "",
+        "shop_name": "",
+        "category": "",
+        "product_classification": "",
+        "product": "",
+        "order_no": "",
+        "province": "",
+        "city": "",
+        "order_source": "",
+    }
+    for key, value in (intent.get("filters") or {}).items():
+        if key in filters and key not in ("start_time", "end_time") and value:
+            filters[key] = str(value).strip()
     body_filters = body.get("filters") or {}
     if not isinstance(body_filters, dict):
         raise HTTPException(status_code=400, detail="filters 必须是 JSON 对象")
-    filters.update({key: value for key, value in body_filters.items() if key in filters and value})
+    for key, value in body_filters.items():
+        if key in filters and value:
+            filters[key] = str(value).strip()
+            if key not in ("start_time", "end_time"):
+                intent["filters"][key] = filters[key]
+                if key in ENTITY_FILTER_KEYS:
+                    intent["filter_hints"][key] = filters[key]
+    intent["time_range"]["start_time"] = filters["start_time"]
+    intent["time_range"]["end_time"] = filters["end_time"]
     validate_date_filters(filters)
+    return filters
+
+
+def load_analysis_catalogs(
+    user: dict[str, Any],
+    filters: dict[str, Any],
+    filter_hints: dict[str, Any] | None = None,
+) -> dict[str, list[str]]:
+    catalog_filters = {
+        "start_time": filters["start_time"],
+        "end_time": filters["end_time"],
+        "dept": "",
+        "platform": "",
+        "shop_name": "",
+        "category": "",
+        "product_classification": "",
+        "product": "",
+        "order_no": "",
+        "province": "",
+        "city": "",
+        "order_source": "",
+    }
+    where, params = order_where(user, catalog_filters)
+    sql = f"""
+        SELECT DISTINCT
+          o.dept, o.platform, o.shop_name, o.category, o.product_classification,
+          o.province, o.city, o.order_source, o.product_name, o.product_no, o.sku_id
+        FROM t_order_sku_detail o
+        {where}
+        LIMIT 5000
+    """
+    catalogs = {key: set() for key in ENTITY_FILTER_KEYS}
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = list(cur.fetchall())
+    for row in rows:
+        for field in ENTITY_FILTER_KEYS:
+            if field == "product":
+                for key in ("product_name", "product_no", "sku_id"):
+                    if row.get(key):
+                        catalogs[field].add(str(row[key]).strip())
+            elif row.get(field):
+                catalogs[field].add(str(row[field]).strip())
+
+    product_hint = str((filter_hints or {}).get("product") or "").strip()
+    if product_hint:
+        targeted_params = dict(params)
+        targeted_params["catalog_product_like"] = f"%{product_hint}%"
+        targeted_sql = f"""
+            SELECT DISTINCT o.product_name, o.product_no, o.sku_id
+            FROM t_order_sku_detail o
+            {where}
+              AND (
+                o.product_name LIKE %(catalog_product_like)s
+                OR o.product_no LIKE %(catalog_product_like)s
+                OR o.sku_id LIKE %(catalog_product_like)s
+              )
+            LIMIT 20
+        """
+        with connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(targeted_sql, targeted_params)
+                product_rows = list(cur.fetchall())
+        for row in product_rows:
+            for key in ("product_name", "product_no", "sku_id"):
+                if row.get(key):
+                    catalogs["product"].add(str(row[key]).strip())
+    return {key: sorted(values) for key, values in catalogs.items()}
+
+
+def build_analysis_query_plans(
+    user: dict[str, Any],
+    question: str,
+    filters: dict[str, Any],
+    intent: dict[str, Any],
+    parser_source: str,
+) -> list[dict[str, Any]]:
     where, params = order_where(user, filters)
-    ark_intent = await asyncio.to_thread(parse_analytics_intent, question)
-    plan = build_sql(question, where, params, intent=ark_intent)
-    plan["parser"] = "ark" if ark_intent else "rules"
+    primary = build_sql(question, where, params, intent=intent)
+    primary.update(
+        {
+            "key": "current",
+            "label": intent["time_range"].get("label") or "当前周期",
+            "filters": dict(filters),
+            "parser": parser_source,
+        }
+    )
+    plans = [primary]
+
+    comparison = intent.get("comparison") or {}
+    if comparison.get("mode") in {"previous_period", "year_over_year"}:
+        compare_filters = dict(filters)
+        compare_filters["start_time"] = comparison["start_time"]
+        compare_filters["end_time"] = comparison["end_time"]
+        compare_where, compare_params = order_where(user, compare_filters)
+        compare_plan = build_sql(question, compare_where, compare_params, intent=intent)
+        compare_plan.update(
+            {
+                "key": "comparison",
+                "label": comparison.get("label") or "对比周期",
+                "filters": compare_filters,
+                "parser": parser_source,
+            }
+        )
+        plans.append(compare_plan)
+
+    for plan in plans:
+        audit_sql_plan(plan["sql"], plan["params"])
+        plan["ark_enabled"] = ark_analytics_enabled()
+    return plans
+
+
+async def prepare_analysis_context(
+    user: dict[str, Any],
+    body: dict[str, Any],
+    *,
+    allow_clarification: bool,
+) -> dict[str, Any]:
+    question = validate_analysis_question(body)
+    confirmed_raw = body.get("confirmed_intent")
+    confirmed = isinstance(confirmed_raw, dict)
+    warnings: list[str] = []
+
+    if confirmed:
+        intent = normalize_analysis_intent_v2(dict(confirmed_raw), question)
+        parser_source = "confirmed"
+        if intent:
+            intent["confidence"] = 1.0
+            intent["clarifications"] = []
+    else:
+        ark_intent = await asyncio.to_thread(parse_analytics_intent, question)
+        if ark_intent:
+            intent = ark_intent
+            parser_source = "ark"
+        else:
+            intent = build_rule_intent(question)
+            parser_source = "rules"
+            warnings.append("Ark 智能解析未启用或暂不可用，本次使用本地规则解析。")
+
+    if not intent:
+        raise HTTPException(status_code=400, detail="无法解析分析需求，请换一种更明确的问法")
+
+    filters = analysis_filters_from_intent(intent, body)
+    catalogs = await asyncio.to_thread(load_analysis_catalogs, user, filters, intent.get("filter_hints"))
+    resolved_filters, clarifications = resolve_filter_entities(
+        question,
+        intent,
+        catalogs,
+        confirmed=confirmed,
+    )
+    intent["filters"].update(resolved_filters)
+    intent["clarifications"] = clarifications
+    intent["dimensions"] = collapse_filtered_dimensions(question, intent)
+    filters = analysis_filters_from_intent(intent, body)
+
+    plans: list[dict[str, Any]] = []
+    if not clarifications or not allow_clarification:
+        try:
+            plans = build_analysis_query_plans(user, question, filters, intent, parser_source)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"分析 SQL 未通过安全审计：{exc}") from exc
+    return {
+        "question": question,
+        "intent": intent,
+        "filters": filters,
+        "plans": plans,
+        "parser_source": parser_source,
+        "ark_enabled": ark_analytics_enabled(),
+        "warnings": warnings,
+        "clarifications": clarifications,
+    }
+
+
+def execute_analysis_queries(context: dict[str, Any]) -> dict[str, Any]:
+    rows_by_key: dict[str, list[dict[str, Any]]] = {}
+    with connection() as conn:
+        with conn.cursor() as cur:
+            for plan in context["plans"][:4]:
+                cur.execute(plan["sql"], plan["params"])
+                rows_by_key[plan["key"]] = normalize_rows(list(cur.fetchall()))
+
+    plan = context["plans"][0]
+    rows = rows_by_key.get("current", [])
+    previous_rows = rows_by_key.get("comparison", [])
+    compared = comparison_rows(rows, previous_rows, plan) if previous_rows else []
+    chart = build_chart(context["question"], rows, plan)
+    insights = build_structured_insights(rows, plan, context["intent"], compared)
+    return {
+        "rows": rows,
+        "previous_rows": previous_rows,
+        "comparison_rows": compared,
+        "chart": chart,
+        "insights": insights,
+        "answer": summarize_insights(insights),
+    }
+
+
+async def synthesize_analysis_context(context: dict[str, Any], executed: dict[str, Any]) -> str:
+    intent = context["intent"]
+    answer = executed["answer"]
+    if intent.get("analysis_type") in {"diagnosis", "contribution"} and executed["rows"]:
+        synthesized = await asyncio.to_thread(
+            synthesize_analytics_answer,
+            context["question"],
+            intent,
+            executed["insights"],
+            executed["rows"],
+        )
+        if synthesized:
+            answer = synthesized
+        elif context["ark_enabled"]:
+            context["warnings"].append("智能结论生成失败，已返回基于查询结果的确定性摘要。")
+    return answer
+
+
+def build_analysis_result(
+    context: dict[str, Any],
+    executed: dict[str, Any],
+    answer: str,
+    trace: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    intent = context["intent"]
+    primary = context["plans"][0]
+    return {
+        "question": context["question"],
+        "answer": answer,
+        "filters": context["filters"],
+        "intent": intent,
+        "sql": primary["sql"].replace("%%", "%"),
+        "sql_params": primary["params"],
+        "queries": [
+            {
+                "key": plan["key"],
+                "label": plan["label"],
+                "sql": plan["sql"].replace("%%", "%"),
+                "sql_params": plan["params"],
+            }
+            for plan in context["plans"]
+        ],
+        "dimensions": primary["dimensions"],
+        "metrics": primary["metrics"],
+        "parser": context["parser_source"],
+        "parser_source": context["parser_source"],
+        "ark_enabled": context["ark_enabled"],
+        "warnings": context["warnings"],
+        "trace": trace or [],
+        "rows": executed["rows"],
+        "previous_rows": executed["previous_rows"],
+        "comparison_rows": executed["comparison_rows"],
+        "chart": executed["chart"],
+        "insights": executed["insights"],
+    }
+
+
+async def execute_analysis_context(context: dict[str, Any], trace: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    executed = await asyncio.to_thread(execute_analysis_queries, context)
+    answer = await synthesize_analysis_context(context, executed)
+    return build_analysis_result(context, executed, answer, trace)
+
+
+async def build_analysis_plan(user: dict[str, Any], body: dict[str, Any]) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any]]:
+    context = await prepare_analysis_context(user, body, allow_clarification=False)
+    plan = context["plans"][0]
     plan["ark_enabled"] = ark_analytics_enabled()
-    try:
-        audit_sql_plan(plan["sql"], params)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=f"分析 SQL 未通过安全审计：{exc}") from exc
-    return question, filters, params, plan
+    return context["question"], context["filters"], plan["params"], plan
 
 
 def mask_phone(value: str | None) -> str:
@@ -670,12 +981,13 @@ def api_dashboard(request: Request):
     current_start = datetime.strptime(filters["start_time"], "%Y-%m-%d").date()
     current_end = datetime.strptime(filters["end_time"], "%Y-%m-%d").date()
     period_days = (current_end - current_start).days + 1
-    previous_end = current_start - timedelta(days=1)
-    previous_start = previous_end - timedelta(days=period_days - 1)
+    try:
+        previous_period = comparison_period(filters)
+    except (ValueError, OverflowError) as exc:
+        raise HTTPException(400, "对比周期无效或超出支持的日期范围") from exc
+    previous_start = date.fromisoformat(previous_period["start_time"])
+    previous_end = date.fromisoformat(previous_period["end_time"])
     global_aggregate_available = can_use_global_monthly(user, filters)
-    if global_aggregate_available:
-        previous_start = add_months(current_start, -1)
-        previous_end = current_start - timedelta(days=1)
 
     combined_filters = dict(filters)
     combined_filters["start_time"] = previous_start.isoformat()
@@ -686,7 +998,7 @@ def api_dashboard(request: Request):
             "current_start": current_start.isoformat(),
             "current_end_exclusive": (current_end + timedelta(days=1)).isoformat(),
             "previous_start": previous_start.isoformat(),
-            "previous_end_exclusive": current_start.isoformat(),
+            "previous_end_exclusive": (previous_end + timedelta(days=1)).isoformat(),
         }
     )
     current_where, current_params = order_where(user, filters)
@@ -823,14 +1135,14 @@ def api_dashboard(request: Request):
             else:
                 cur.execute(
                     f"""
-                    SELECT o.product_no, o.product_name, o.category, o.product_classification,
+                    SELECT o.product_no, MAX(o.product_name) AS product_name, o.category, o.product_classification,
                            SUM(o.qty) AS qty,
                            SUM(o.share_receivable) AS revenue,
                            SUM(o.profit) AS profit,
                            CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate
                     FROM t_order_sku_detail o
                     {current_where}
-                    GROUP BY o.product_no, o.product_name, o.category, o.product_classification
+                    GROUP BY o.product_no, o.category, o.product_classification
                     ORDER BY revenue DESC
                     LIMIT 8
                     """,
@@ -849,6 +1161,8 @@ def api_dashboard(request: Request):
     previous_profit = summary.pop("previous_profit")
     previous_orders = summary.pop("previous_orders")
     comparison = {
+        "mode": previous_period["mode"],
+        "label": previous_period["label"],
         "start_time": previous_start.isoformat(),
         "end_time": previous_end.isoformat(),
         "revenue": previous_revenue,
@@ -940,7 +1254,7 @@ def api_products(request: Request):
             else:
                 cur.execute(
                     f"""
-                    SELECT o.product_no, o.product_name, o.category, o.product_classification,
+                    SELECT o.product_no, MAX(o.product_name) AS product_name, o.category, o.product_classification,
                            SUM(o.qty) AS qty,
                            SUM(o.share_receivable) AS revenue,
                            SUM(o.cost) AS cost,
@@ -948,7 +1262,7 @@ def api_products(request: Request):
                            CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate
                     FROM t_order_sku_detail o
                     {where}
-                    GROUP BY o.product_no, o.product_name, o.category, o.product_classification
+                    GROUP BY o.product_no, o.category, o.product_classification
                     ORDER BY revenue DESC
                     LIMIT 100
                     """,
@@ -1005,8 +1319,8 @@ def api_shops(request: Request):
 COMMERCE_DIMENSIONS = {
     "product": {
         "label": "产品",
-        "select": "o.product_no AS product_no, o.product_name AS product_name",
-        "group": "o.product_no, o.product_name",
+        "select": "o.product_no AS product_no, MAX(o.product_name) AS product_name",
+        "group": "o.product_no",
         "label_sql": "MAX(o.product_name)",
     },
     "shop": {
@@ -1196,7 +1510,7 @@ def api_commerce_dashboard(request: Request):
             else:
                 cur.execute(
                     f"""
-                    SELECT o.product_no, o.product_name, o.product_classification, o.shop_name,
+                    SELECT o.product_no, MAX(o.product_name) AS product_name, o.product_classification, o.shop_name,
                            COALESCE(SUM(o.share_receivable), 0) AS revenue,
                            COALESCE(SUM(o.qty), 0) AS qty,
                            COALESCE(SUM(o.profit), 0) AS profit,
@@ -1204,7 +1518,7 @@ def api_commerce_dashboard(request: Request):
                            CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate
                     FROM t_order_sku_detail o
                     {where}
-                    GROUP BY o.product_no, o.product_name, o.product_classification, o.shop_name
+                    GROUP BY o.product_no, o.product_classification, o.shop_name
                     HAVING profit < 0 OR profit_rate < 10
                     ORDER BY profit ASC, revenue DESC
                     LIMIT 20
@@ -1233,39 +1547,20 @@ async def api_analytics_ask(request: Request):
     user = require_analytics_user(request)
     rate_limit_analytics(request, user)
     body = await read_json_body(request)
-    question, filters, params, plan = await build_analysis_plan(user, body)
     started = time.perf_counter()
-    with connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(plan["sql"], params)
-            rows = normalize_rows(list(cur.fetchall()))
-    chart = build_chart(question, rows, plan)
-    answer = summarize_answer(question, rows, plan)
+    context = await prepare_analysis_context(user, body, allow_clarification=False)
+    result = await execute_analysis_context(context)
     analytics_logger.info(
         "analytics ask user=%s rows=%s elapsed_ms=%.1f parser=%s dimensions=%s metrics=%s question=%r",
         user.get("username"),
-        len(rows),
+        len(result["rows"]),
         (time.perf_counter() - started) * 1000,
-        plan["parser"],
-        ",".join(plan["dimensions"]),
-        ",".join(plan["metrics"]),
-        question,
+        result["parser_source"],
+        ",".join(result["dimensions"]),
+        ",".join(result["metrics"]),
+        result["question"],
     )
-    return api_ok(
-        {
-            "question": question,
-            "answer": answer,
-            "filters": filters,
-            "sql": plan["sql"].replace("%%", "%"),
-            "sql_params": plan["params"],
-            "dimensions": plan["dimensions"],
-            "metrics": plan["metrics"],
-            "parser": plan["parser"],
-            "ark_enabled": plan["ark_enabled"],
-            "rows": rows,
-            "chart": chart,
-        }
-    )
+    return api_ok(result)
 
 
 @app.post("/api/analytics/parse")
@@ -1273,37 +1568,232 @@ async def api_analytics_parse(request: Request):
     user = require_analytics_user(request)
     rate_limit_analytics(request, user)
     body = await read_json_body(request)
-    question, filters, _params, plan = await build_analysis_plan(user, body)
+    context = await prepare_analysis_context(user, body, allow_clarification=True)
+    plan = context["plans"][0] if context["plans"] else None
+    intent = context["intent"]
     analytics_logger.info(
         "analytics parse user=%s parser=%s dimensions=%s metrics=%s question=%r",
         user.get("username"),
-        plan["parser"],
-        ",".join(plan["dimensions"]),
-        ",".join(plan["metrics"]),
-        question,
+        context["parser_source"],
+        ",".join(intent["dimensions"]),
+        ",".join(intent["metrics"]),
+        context["question"],
     )
     return api_ok(
         {
-            "question": question,
-            "filters": filters,
-            "sql": plan["sql"].replace("%%", "%"),
-            "sql_params": plan["params"],
-            "dimensions": plan["dimensions"],
-            "metrics": plan["metrics"],
-            "order_metric": plan["order_metric"],
-            "wants_share": plan["wants_share"],
-            "parser": plan["parser"],
-            "ark_enabled": plan["ark_enabled"],
+            "question": context["question"],
+            "filters": context["filters"],
+            "intent": intent,
+            "clarifications": context["clarifications"],
+            "warnings": context["warnings"],
+            "sql": plan["sql"].replace("%%", "%") if plan else "",
+            "sql_params": plan["params"] if plan else {},
+            "dimensions": intent["dimensions"],
+            "metrics": intent["metrics"],
+            "order_metric": intent["order_metric"],
+            "wants_share": intent["wants_share"],
+            "parser": context["parser_source"],
+            "parser_source": context["parser_source"],
+            "ark_enabled": context["ark_enabled"],
         }
+    )
+
+
+def analysis_sse_event(event: str, data: dict[str, Any]) -> str:
+    encoded = json.dumps(jsonable_encoder(data), ensure_ascii=False, separators=(",", ":"))
+    return f"event: {event}\ndata: {encoded}\n\n"
+
+
+@app.post("/api/analytics/stream")
+async def api_analytics_stream(request: Request):
+    user = require_analytics_user(request)
+    rate_limit_analytics(request, user)
+    body = await read_json_body(request)
+    validate_analysis_question(body)
+    request_id = uuid.uuid4().hex[:12]
+
+    async def event_stream():
+        started = time.perf_counter()
+        trace: list[dict[str, Any]] = []
+
+        def stage(
+            stage_key: str,
+            status: str,
+            title: str,
+            summary: str,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            item = {
+                "request_id": request_id,
+                "stage": stage_key,
+                "status": status,
+                "title": title,
+                "summary": summary,
+                "payload": payload or {},
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 1),
+            }
+            trace.append(item)
+            return item
+
+        try:
+            yield analysis_sse_event(
+                "progress",
+                stage("understanding", "running", "理解问题", "正在识别时间、业务条件、指标和分析目标。"),
+            )
+            context = await prepare_analysis_context(user, body, allow_clarification=True)
+            intent = context["intent"]
+            yield analysis_sse_event(
+                "progress",
+                stage(
+                    "understanding",
+                    "done",
+                    "理解问题",
+                    f"已通过{' Ark' if context['parser_source'] == 'ark' else '本地规则'}形成结构化需求。",
+                    {
+                        "parser_source": context["parser_source"],
+                        "confidence": intent["confidence"],
+                        "analysis_type": intent["analysis_type"],
+                    },
+                ),
+            )
+            yield analysis_sse_event(
+                "progress",
+                stage(
+                    "resolving",
+                    "done" if not context["clarifications"] else "warning",
+                    "解析业务条件",
+                    "已将问题中的业务词匹配到当前数据范围。"
+                    if not context["clarifications"]
+                    else "部分业务条件需要你确认后才能继续。",
+                    {"filters": context["filters"]},
+                ),
+            )
+            yield analysis_sse_event(
+                "progress",
+                stage(
+                    "authorizing",
+                    "done",
+                    "校验权限",
+                    "查询计划已叠加当前账号的数据范围与日期上限。",
+                ),
+            )
+
+            if context["clarifications"]:
+                yield analysis_sse_event(
+                    "clarification",
+                    {
+                        "request_id": request_id,
+                        "intent": intent,
+                        "filters": context["filters"],
+                        "clarifications": context["clarifications"],
+                        "warnings": context["warnings"],
+                        "parser_source": context["parser_source"],
+                        "trace": trace,
+                    },
+                )
+                return
+
+            yield analysis_sse_event(
+                "progress",
+                stage(
+                    "planning",
+                    "done",
+                    "生成查询计划",
+                    f"已生成 {len(context['plans'])} 个只读受控查询并通过安全审计。",
+                    {
+                        "dimensions": intent["dimensions"],
+                        "metrics": intent["metrics"],
+                        "limit": intent["limit"],
+                    },
+                ),
+            )
+            if await request.is_disconnected():
+                return
+            yield analysis_sse_event(
+                "progress",
+                stage("querying", "running", "读取数据", "正在执行受权限约束的聚合查询。"),
+            )
+            executed = await asyncio.to_thread(execute_analysis_queries, context)
+            yield analysis_sse_event(
+                "progress",
+                stage(
+                    "querying",
+                    "done",
+                    "读取数据",
+                    f"查询完成，当前周期返回 {len(executed['rows'])} 行聚合结果。",
+                    {"row_count": len(executed["rows"]), "query_count": len(context["plans"])},
+                ),
+            )
+            if await request.is_disconnected():
+                return
+            yield analysis_sse_event(
+                "progress",
+                stage("synthesizing", "running", "形成结论", "正在把查询结果整理为可核对的发现与建议。"),
+            )
+            answer = await synthesize_analysis_context(context, executed)
+            yield analysis_sse_event(
+                "progress",
+                stage(
+                    "synthesizing",
+                    "done",
+                    "形成结论",
+                    f"已形成 {len(executed['insights'])} 条结构化发现。",
+                    {"insight_count": len(executed["insights"])},
+                ),
+            )
+            stage("completed", "done", "分析完成", "口径、证据和结果已全部就绪。")
+            result = build_analysis_result(context, executed, answer, trace)
+            analytics_logger.info(
+                "analytics stream user=%s request_id=%s rows=%s elapsed_ms=%.1f parser=%s dimensions=%s metrics=%s question=%r",
+                user.get("username"),
+                request_id,
+                len(result["rows"]),
+                (time.perf_counter() - started) * 1000,
+                result["parser_source"],
+                ",".join(result["dimensions"]),
+                ",".join(result["metrics"]),
+                result["question"],
+            )
+            yield analysis_sse_event("result", {"request_id": request_id, "result": result})
+        except HTTPException as exc:
+            yield analysis_sse_event(
+                "error",
+                {
+                    "request_id": request_id,
+                    "message": str(exc.detail),
+                    "trace": trace,
+                },
+            )
+        except Exception:
+            analytics_logger.exception("analytics stream failed request_id=%s user=%s", request_id, user.get("username"))
+            yield analysis_sse_event(
+                "error",
+                {
+                    "request_id": request_id,
+                    "message": "分析过程发生异常，请稍后重试或调整分析条件。",
+                    "trace": trace,
+                },
+            )
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
     )
 
 
 @app.get("/api/imports")
 def api_imports(request: Request):
-    require_api_user(request, "import")
+    user = require_api_user(request, "import")
     with connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM t_import_log ORDER BY import_time DESC LIMIT 50")
+            params = {}
+            clause = import_batch_access_clause(user, params)
+            cur.execute(f"SELECT l.* FROM t_import_log l WHERE 1=1 {clause} ORDER BY import_time DESC LIMIT 50", params)
             logs = list(cur.fetchall())
     return api_ok({"logs": logs})
 
@@ -1348,13 +1838,10 @@ async def api_import_upload(request: Request, background_tasks: BackgroundTasks,
 
 @app.get("/api/imports/{batch_no}")
 def api_import_detail(request: Request, batch_no: str):
-    require_api_user(request, "import")
+    user = require_api_user(request, "import")
     with connection() as conn:
+        log = require_import_batch(conn, user, batch_no)
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM t_import_log WHERE batch_no = %(batch_no)s", {"batch_no": batch_no})
-            log = cur.fetchone()
-            if not log:
-                raise HTTPException(status_code=404, detail="导入批次不存在")
             rows: list[dict[str, Any]] = []
             if log["status"] != "processing":
                 cur.execute(
@@ -1462,13 +1949,13 @@ def dashboard(request: Request):
             summary = cur.fetchone()
             cur.execute(
                 f"""
-                SELECT o.product_no, o.product_name, o.product_classification,
+                SELECT o.product_no, MAX(o.product_name) AS product_name, o.product_classification,
                        SUM(o.qty) AS qty,
                        SUM(o.share_receivable) AS revenue,
                        SUM(o.profit) AS profit
                 FROM t_order_sku_detail o
                 {where}
-                GROUP BY o.product_no, o.product_name, o.product_classification
+                GROUP BY o.product_no, o.product_classification
                 ORDER BY revenue DESC
                 LIMIT 8
                 """,
@@ -1560,7 +2047,8 @@ def orders_export(request: Request):
     return StreamingResponse(
         iter_csv(),
         media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
+        headers={"Content-Disposition": f"attachment; filename={filename}",
+                 "X-Export-Row-Limit": "50000", "Cache-Control": "private, no-store"},
     )
 
 
@@ -1571,7 +2059,9 @@ def imports_page(request: Request):
         return user
     with connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM t_import_log ORDER BY import_time DESC LIMIT 50")
+            params = {}
+            clause = import_batch_access_clause(user, params)
+            cur.execute(f"SELECT l.* FROM t_import_log l WHERE 1=1 {clause} ORDER BY import_time DESC LIMIT 50", params)
             logs = list(cur.fetchall())
     return render(request, "imports.html", {"user": user, "logs": logs, "error": ""})
 
@@ -1747,7 +2237,14 @@ def active_import_batch() -> str | None:
 
 
 def update_import_log(batch_no: str, status: str, total_rows: int, fail_rows: int, remark: str) -> None:
+    from app.import_lifecycle import require_processing
     with connection() as conn:
+        try:
+            require_processing(conn, batch_no)
+        except HTTPException:
+            if status == "failed":
+                return  # Never overwrite the recovery or a completed result.
+            raise
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -1770,7 +2267,9 @@ def update_import_log(batch_no: str, status: str, total_rows: int, fail_rows: in
 
 
 def finalize_import_batch(batch_no: str, total_rows: int, fail_rows: int, file_hash: str) -> None:
+    from app.import_lifecycle import require_processing
     with connection() as conn:
+        require_processing(conn, batch_no)
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -1837,20 +2336,41 @@ def finalize_import_batch(batch_no: str, total_rows: int, fail_rows: int, file_h
 
 
 def process_import_batch(tmp_path: Path, batch_no: str, filename: str, username: str) -> None:
+    from app.import_lifecycle import processing_lease
+    try:
+        with connection() as lease_conn:
+            with processing_lease(lease_conn, batch_no):
+                with lease_conn.cursor() as cur:
+                    cur.execute("SELECT status FROM t_import_log WHERE batch_no=%(batch)s", {"batch": batch_no})
+                    log = cur.fetchone()
+                if log and log["status"] == "processing":
+                    _process_import_batch(tmp_path, batch_no, filename, username)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def _process_import_batch(tmp_path: Path, batch_no: str, filename: str, username: str) -> None:
+    from app.import_lifecycle import require_processing
     total_rows = 0
     fail_rows = 0
     buffer: list[dict[str, Any]] = []
     hasher = UnorderedBatchFingerprint()
     try:
+        importing_user = load_user_by_username(username)
+        if not importing_user or not has_permission(importing_user, "import"):
+            raise PermissionError("导入账号已停用或权限已变化，请重新上传")
         update_import_log(batch_no, "processing", 0, 0, "正在解析 Excel")
         for row in iter_excel_rows(tmp_path, batch_no):
             total_rows += 1
+            if not row_in_scope(importing_user, row):
+                raise PermissionError(f"第 {row['row_no']} 行超出当前部门、平台或店铺授权范围，批次已拒绝")
             update_batch_fingerprint(hasher, row)
             if row["error_message"]:
                 fail_rows += 1
             buffer.append(row)
             if len(buffer) >= IMPORT_INSERT_CHUNK_SIZE:
                 with connection() as conn:
+                    require_processing(conn, batch_no)
                     with conn.cursor() as cur:
                         insert_tmp_import_rows(cur, buffer)
                 buffer.clear()
@@ -1865,6 +2385,7 @@ def process_import_batch(tmp_path: Path, batch_no: str, filename: str, username:
 
         if buffer:
             with connection() as conn:
+                require_processing(conn, batch_no)
                 with conn.cursor() as cur:
                     insert_tmp_import_rows(cur, buffer)
 
@@ -1943,11 +2464,8 @@ def import_detail(request: Request, batch_no: str):
     if isinstance(user, RedirectResponse):
         return user
     with connection() as conn:
+        log = require_import_batch(conn, user, batch_no)
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM t_import_log WHERE batch_no = %(batch_no)s", {"batch_no": batch_no})
-            log = cur.fetchone()
-            if not log:
-                raise HTTPException(status_code=404, detail="导入批次不存在")
             cur.execute(
                 """
                 SELECT *
@@ -1959,7 +2477,7 @@ def import_detail(request: Request, batch_no: str):
                 {"batch_no": batch_no},
             )
             rows = list(cur.fetchall())
-    return render(request, "import_detail.html", {"user": user, "log": log, "rows": rows})
+    return render(request, "import_detail.html", {"user": user, "log": log, "rows": mask_sensitive_rows(rows)})
 
 
 @app.post("/imports/{batch_no}/commit")
@@ -1972,10 +2490,7 @@ def import_commit(request: Request, batch_no: str):
         lock_acquired = False
         try:
             with conn.cursor() as cur:
-                cur.execute("SELECT status, file_hash FROM t_import_log WHERE batch_no = %(batch_no)s", {"batch_no": batch_no})
-                log = cur.fetchone()
-                if not log:
-                    raise HTTPException(status_code=404, detail="导入批次不存在")
+                log = require_import_batch(conn, user, batch_no)
 
                 lock_seed = str(log.get("file_hash") or batch_no)
                 lock_name = f"order_commit_{hashlib.sha256(lock_seed.encode('utf-8')).hexdigest()[:40]}"
@@ -1984,8 +2499,7 @@ def import_commit(request: Request, batch_no: str):
                 if not lock_acquired:
                     raise HTTPException(status_code=409, detail="批次正在提交，请稍后查看结果。")
 
-                cur.execute("SELECT status, file_hash FROM t_import_log WHERE batch_no = %(batch_no)s", {"batch_no": batch_no})
-                log = cur.fetchone()
+                log = require_import_batch(conn, user, batch_no, for_update=True)
                 if log["status"] == "committed":
                     return redirect(f"/imports/{batch_no}")
                 if log["status"] != "validated":
@@ -2000,6 +2514,7 @@ def import_commit(request: Request, batch_no: str):
                           AND status = 'committed'
                           AND batch_no <> %(batch_no)s
                         LIMIT 1
+                        FOR UPDATE
                         """,
                         {"file_hash": log["file_hash"], "batch_no": batch_no},
                     )
@@ -2053,13 +2568,13 @@ def import_commit(request: Request, batch_no: str):
                       link_id, sku_id, order_source, customer_no, customer_name, dept, platform, shop_name, order_no, original_order_no,
                       logistics_type, logistics_no, receiver_name, receiver_address, receiver_phone, category, product_classification, product_name,
                       product_no, unit, qty, share_receivable, province, city, district, ship_time, cost, express_fee,
-                      logistics_fee, freight, aux_material, share_cost
+                      logistics_fee, freight, aux_material, share_cost, source_batch_no, source_row_no
                     )
                     SELECT
                       link_id, sku_id, order_source, customer_no, customer_name, dept, platform, shop_name, order_no, original_order_no,
                       logistics_type, logistics_no, receiver_name, receiver_address, receiver_phone, category, product_classification, product_name,
                       product_no, unit, qty, share_receivable, province, city, district, ship_time, cost, express_fee,
-                      logistics_fee, freight, aux_material, share_cost
+                      logistics_fee, freight, aux_material, share_cost, batch_no, row_no
                     FROM tmp_order_import
                     WHERE batch_no = %(batch_no)s
                     """,
@@ -2104,7 +2619,7 @@ def product_analytics(request: Request):
         with conn.cursor() as cur:
             cur.execute(
                 f"""
-                SELECT o.product_no, o.product_name, o.category, o.product_classification,
+                SELECT o.product_no, MAX(o.product_name) AS product_name, o.category, o.product_classification,
                        SUM(o.qty) AS qty,
                        SUM(o.share_receivable) AS revenue,
                        SUM(o.cost) AS cost,
@@ -2112,7 +2627,7 @@ def product_analytics(request: Request):
                        CASE WHEN SUM(o.share_receivable) = 0 THEN 0 ELSE SUM(o.profit) / SUM(o.share_receivable) * 100 END AS profit_rate
                 FROM t_order_sku_detail o
                 {where}
-                GROUP BY o.product_no, o.product_name, o.category, o.product_classification
+                GROUP BY o.product_no, o.category, o.product_classification
                 ORDER BY revenue DESC
                 LIMIT 100
                 """,
@@ -2288,3 +2803,7 @@ def forbidden(request: Request, exc: HTTPException):
         {"request": request, "current_path": request.url.path, "user": user, "title": "没有权限", "message": exc.detail},
         status_code=403,
     )
+
+
+from app.workbench_api import router as workbench_router
+app.include_router(workbench_router)

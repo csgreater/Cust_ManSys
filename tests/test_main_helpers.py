@@ -6,8 +6,10 @@ from fastapi import HTTPException
 
 from app.main import (
     UnorderedBatchFingerprint,
+    analysis_sse_event,
     attach_revenue_shares,
     mask_sensitive_rows,
+    order_where,
     update_batch_fingerprint,
     validate_date_filters,
 )
@@ -32,6 +34,9 @@ class MainHelperTests(unittest.TestCase):
         self.assertEqual(result[0]["receiver_name"], "王**")
         self.assertEqual(result[0]["receiver_phone"], "138****8000")
         self.assertNotIn("世纪大道", result[0]["receiver_address"])
+        legacy = mask_sensitive_rows([{"error_message": "receiver_address格式错误，原值：世纪大道100号；receiver_phone原值：13800138000"}])
+        self.assertNotIn("世纪大道", legacy[0]["error_message"])
+        self.assertNotIn("13800138000", legacy[0]["error_message"])
 
     def test_revenue_shares_reuse_full_summary_total(self) -> None:
         rows = [{"revenue": 30}, {"revenue": 20}]
@@ -57,6 +62,42 @@ class MainHelperTests(unittest.TestCase):
         update_batch_fingerprint(right, first)
 
         self.assertEqual(left.hexdigest(), right.hexdigest())
+
+    def test_analysis_sse_event_preserves_unicode_and_event_type(self) -> None:
+        event = analysis_sse_event("progress", {"stage": "understanding", "summary": "理解问题"})
+
+        self.assertTrue(event.startswith("event: progress\n"))
+        self.assertIn('"summary":"理解问题"', event)
+        self.assertTrue(event.endswith("\n\n"))
+
+    def test_order_where_supports_region_and_source_filters(self) -> None:
+        user = {
+            "permissions": {"admin"},
+            "all_scopes": {"dept": True, "platform": True, "shop": True},
+            "scopes": {"dept": [], "platform": [], "shop": []},
+        }
+        where, params = order_where(
+            user,
+            {
+                "start_time": "2026-01-01",
+                "end_time": "2026-06-30",
+                "dept": "",
+                "platform": "",
+                "shop_name": "",
+                "category": "",
+                "product_classification": "",
+                "product": "",
+                "order_no": "",
+                "province": "上海",
+                "city": "上海市",
+                "order_source": "直播",
+            },
+        )
+
+        self.assertIn("o.province = %(province)s", where)
+        self.assertIn("o.city = %(city)s", where)
+        self.assertIn("o.order_source = %(order_source)s", where)
+        self.assertEqual(params["province"], "上海")
 
 
 if __name__ == "__main__":

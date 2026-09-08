@@ -85,6 +85,82 @@ class ImportServiceTests(unittest.TestCase):
         self.assertIn("share_receivable必须是有限数字", result.rows[0]["error_message"])
         self.assertIn("cost超出数据库可保存范围", result.rows[0]["error_message"])
 
+    def test_overlong_identifier_is_rejected_without_breaking_staging_shape(self) -> None:
+        values = self.valid_values()
+        raw_order_no = "ORDER-" + "X" * 123
+        values["订单编号"] = raw_order_no
+        with TemporaryDirectory() as temp:
+            result = parse_excel(self.create_workbook(Path(temp), values), batch_no="batch-long-id")
+
+        row = result.rows[0]
+        self.assertEqual(result.fail_rows, 1)
+        self.assertEqual(row["order_no"], raw_order_no[:128])
+        self.assertIn("order_no长度129超过数据库上限128", row["error_message"])
+        self.assertIn(raw_order_no, row["error_message"])
+
+    def test_overlong_sensitive_values_are_not_copied_into_diagnostics(self) -> None:
+        for header, field, raw_value, max_length in (
+            ("收货人", "receiver_name", "张" * 33, 32),
+            ("电话", "receiver_phone", "1" * 33, 32),
+            ("地址", "receiver_address", "敏感地址" * 129, 512),
+        ):
+            with self.subTest(field=field), TemporaryDirectory() as temp:
+                values = self.valid_values()
+                values[header] = raw_value
+                result = parse_excel(
+                    self.create_workbook(Path(temp), values),
+                    batch_no=f"batch-private-{field}",
+                )
+
+            error = result.rows[0]["error_message"]
+            self.assertEqual(result.fail_rows, 1)
+            self.assertIn(f"{field}长度{len(raw_value)}超过数据库上限{max_length}", error)
+            self.assertNotIn(raw_value, error)
+            self.assertNotIn("原值：", error)
+
+    def test_decimal_values_with_unstorable_fraction_are_rejected(self) -> None:
+        values = self.valid_values()
+        values["销售额"] = "100.001"
+        with TemporaryDirectory() as temp:
+            result = parse_excel(self.create_workbook(Path(temp), values), batch_no="batch-scale")
+
+        self.assertEqual(result.fail_rows, 1)
+        self.assertEqual(result.rows[0]["share_receivable"], 0)
+        self.assertIn("share_receivable超出数据库小数精度2位", result.rows[0]["error_message"])
+
+    def test_derived_profit_overflow_is_rejected_and_row_remains_storable(self) -> None:
+        values = self.valid_values()
+        values["销售额"] = "9999999999.99"
+        values["成本金额"] = "-9999999999.99"
+        values["利润"] = "0"
+        with TemporaryDirectory() as temp:
+            result = parse_excel(self.create_workbook(Path(temp), values), batch_no="batch-profit-overflow")
+
+        row = result.rows[0]
+        self.assertEqual(result.fail_rows, 1)
+        self.assertEqual(row["profit"], 0)
+        self.assertIn("profit超出数据库可保存范围", row["error_message"])
+        self.assertIn("19999999999.98", row["error_message"])
+
+    def test_legitimate_negative_adjustments_keep_current_profit_formula(self) -> None:
+        values = self.valid_values()
+        values.update(
+            {
+                "数量": -1,
+                "销售额": -100,
+                "成本金额": -40,
+                "运费": -5,
+                "辅料费用": -2,
+                "分摊费用": -3,
+                "利润": -50,
+            }
+        )
+        with TemporaryDirectory() as temp:
+            result = parse_excel(self.create_workbook(Path(temp), values), batch_no="batch-negative-adjustment")
+
+        self.assertEqual(result.fail_rows, 0)
+        self.assertEqual(result.rows[0]["profit"], -50)
+
 
 if __name__ == "__main__":
     unittest.main()

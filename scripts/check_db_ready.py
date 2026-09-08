@@ -21,6 +21,9 @@ REQUIRED_TABLES = {
     "agg_dashboard_monthly",
     "agg_dashboard_daily",
     "agg_platform_monthly",
+    "t_analysis_report",
+    "t_workbench_rules",
+    "t_exception_review",
 }
 
 REQUIRED_INDEXES = {
@@ -36,6 +39,7 @@ REQUIRED_INDEXES = {
         "idx_platform_shop_time",
         "idx_customer_time",
         "idx_logistics_no",
+        "idx_source_batch_row",
     },
     "tmp_order_import": {"PRIMARY", "idx_batch_no", "idx_batch_error", "idx_import_duplicate"},
     "t_import_log": {"PRIMARY", "batch_no", "idx_file_hash_status", "idx_status_time", "idx_import_time"},
@@ -52,6 +56,9 @@ REQUIRED_INDEXES = {
     "agg_dashboard_monthly": {"PRIMARY"},
     "agg_dashboard_daily": {"PRIMARY"},
     "agg_platform_monthly": {"PRIMARY"},
+    "t_workbench_rules": {"PRIMARY"},
+    "t_exception_review": {"PRIMARY"},
+    "t_analysis_report": {"PRIMARY", "uk_report_version", "idx_report_owner"},
 }
 
 REQUIRED_COLUMNS = {
@@ -93,6 +100,8 @@ REQUIRED_COLUMNS = {
         "create_time",
         "update_time",
         "is_deleted",
+        "source_batch_no",
+        "source_row_no",
     },
     "tmp_order_import": {
         "id",
@@ -223,6 +232,14 @@ REQUIRED_COLUMN_LENGTHS = {
         "receiver_address": 512,
     },
 }
+
+REQUIRED_COLUMNS.update({
+    "t_workbench_rules": {"id", "rules_json", "version", "updated_by", "updated_at"},
+    "t_exception_review": {"owner_id", "exception_id", "evidence_hash", "status", "note", "updated_at"},
+    "t_analysis_report": {"id", "owner_id", "series_key", "version", "title", "report_type",
+                          "filters_json", "access_json", "permissions_json", "body_json",
+                          "data_version", "rules_version", "created_at"},
+})
 
 
 def main() -> None:

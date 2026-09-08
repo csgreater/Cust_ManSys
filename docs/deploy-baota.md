@@ -73,6 +73,7 @@ python scripts/migrate_optional_order_source_sku.py
 python scripts/migrate_production_indexes.py
 python scripts/migrate_add_product_classification.py
 python scripts/ensure_future_partitions.py
+python scripts/migrate_anomaly_workbench.py
 python scripts/check_db_ready.py
 ```
 
@@ -115,15 +116,20 @@ client_max_body_size 200m;
 
 ## 7. 后续更新
 
+2026-09-08 异常与报告工作台版本包含新的 Python 依赖、三张工作台表及订单来源字段/索引。升级已有库前备份目标数据库、代码、前端构建和环境配置，暂停导入并安排维护窗口；大表结构变更耗时需先预演。不要使用 `init_db.py` 升级已有库。
+
 ```bash
 cd /www/wwwroot/Cust_ManSys
-git pull
+git pull --ff-only
 source venv/bin/activate
 pip install -r requirements.txt
+python scripts/migrate_anomaly_workbench.py
 python scripts/check_db_ready.py
 ```
 
-如果更新里包含数据库迁移脚本，先备份 MySQL，再执行对应 `scripts/migrate_*.py`。更新完成后在宝塔里重启 Python 项目或进程守护服务。
+`frontend/dist` 已随同版本源码构建并纳入仓库，服务器可直接使用。若自行修改前端，应在同一版本源码上执行 `npm ci && npm run build`。迁移和检查成功后，在宝塔重启 Python 项目或进程守护服务，确认 `/healthz`、`/readyz` 和 `/ui/`，再验证异常查询、报告生成及中文 PDF 下载。
+
+回退时恢复上一版本代码和前端，保留新增表、来源字段和已生成报告/核查记录，不执行删表删列。旧版暂存清理脚本没有解析任务锁，回退期间应暂停该脚本。完整交付与验证范围见 [异常与报告交付说明](workbench-release-2026-09-08.md)。
 
 低配服务器连续导入多个月份后，建议定期清理已完成或失败的导入暂存数据：
 

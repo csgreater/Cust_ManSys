@@ -79,7 +79,9 @@ DECIMAL_MAX_ABS = {
         for field in DECIMAL_FIELDS
         if field != "qty"
     },
+    "profit": Decimal("9999999999.99"),
 }
+DECIMAL_SCALE = Decimal("0.01")
 NON_NEGATIVE_FIELDS: set[str] = set()
 DEFAULT_SHIP_TIME = datetime(1970, 1, 1)
 TEXT_MAX_LENGTHS = {
@@ -107,6 +109,7 @@ TEXT_MAX_LENGTHS = {
     "city": 64,
     "district": 64,
 }
+SENSITIVE_TEXT_FIELDS = {"receiver_name", "receiver_address", "receiver_phone"}
 
 
 @dataclass(frozen=True)
@@ -146,6 +149,35 @@ def normalize_text(field: str, value: Any) -> str:
     if max_length is not None:
         return text[:max_length]
     return text
+
+
+def validate_decimal_for_db(field: str, value: Decimal) -> None:
+    if abs(value) > DECIMAL_MAX_ABS[field]:
+        raise ValueError("超出数据库可保存范围")
+    try:
+        rounded = value.quantize(DECIMAL_SCALE)
+    except InvalidOperation as exc:
+        raise ValueError("超出数据库小数精度2位") from exc
+    if value != rounded:
+        raise ValueError("超出数据库小数精度2位")
+
+
+def text_length_error(field: str, raw_text: str, max_length: int) -> str:
+    if field in SENSITIVE_TEXT_FIELDS:
+        return f"{field}长度{len(raw_text)}超过数据库上限{max_length}"
+    max_diagnostic_length = 300
+    diagnostic = raw_text
+    if len(diagnostic) > max_diagnostic_length:
+        diagnostic = f"{diagnostic[:max_diagnostic_length]}…[原值共{len(raw_text)}字符]"
+    return f"{field}长度{len(raw_text)}超过数据库上限{max_length}，原值：{diagnostic}"
+
+
+def join_diagnostics(messages: list[str], max_length: int = 1000) -> str:
+    result = "; ".join(messages)
+    if len(result) <= max_length:
+        return result
+    suffix = "…[诊断信息超过数据库上限，已限长]"
+    return result[: max_length - len(suffix)] + suffix
 
 
 def to_datetime(value: Any) -> datetime | None:
@@ -217,10 +249,13 @@ def iter_excel_rows(path: Path, batch_no: str) -> Iterator[dict[str, Any]]:
                         item[field] = to_datetime(value)
                     elif field in DECIMAL_FIELDS:
                         item[field] = to_decimal(value)
-                        if abs(item[field]) > DECIMAL_MAX_ABS[field]:
-                            raise ValueError("超出数据库可保存范围")
+                        validate_decimal_for_db(field, item[field])
                     else:
-                        item[field] = normalize_text(field, value)
+                        raw_text = to_text(value)
+                        item[field] = normalize_text(field, raw_text)
+                        max_length = TEXT_MAX_LENGTHS.get(field)
+                        if max_length is not None and len(raw_text) > max_length:
+                            errors.append(text_length_error(field, raw_text, max_length))
                 except ValueError as exc:
                     item[field] = Decimal("0") if field in DECIMAL_FIELDS else None
                     errors.append(f"{field}{exc}")
@@ -235,13 +270,23 @@ def iter_excel_rows(path: Path, batch_no: str) -> Iterator[dict[str, Any]]:
                 item["ship_time"] = DEFAULT_SHIP_TIME
                 warnings.append("发货时间为空，已按 1970-01-01 保存")
 
-            item["profit"] = calc_profit(item)
+            computed_profit = calc_profit(item)
+            try:
+                validate_decimal_for_db("profit", computed_profit)
+                item["profit"] = computed_profit
+            except ValueError as exc:
+                item["profit"] = Decimal("0")
+                errors.append(f"profit{exc}，计算值：{computed_profit}")
             excel_profit = item.get("excel_profit")
-            if excel_profit not in (None, "") and abs(item["profit"] - excel_profit) > Decimal("0.05"):
+            if (
+                excel_profit not in (None, "")
+                and not any(error.startswith("profit超出数据库") for error in errors)
+                and abs(item["profit"] - excel_profit) > Decimal("0.05")
+            ):
                 warnings.append("Excel利润与系统计算利润不一致")
 
-            item["error_message"] = "; ".join(errors)
-            item["warning_message"] = "; ".join(warnings)
+            item["error_message"] = join_diagnostics(errors)
+            item["warning_message"] = join_diagnostics(warnings)
             yield item
     finally:
         wb.close()

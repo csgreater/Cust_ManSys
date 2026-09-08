@@ -8,6 +8,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app.db import connection
+from app.import_lifecycle import recover_stale_batch
+from fastapi import HTTPException
 
 
 def main() -> None:
@@ -15,21 +17,34 @@ def main() -> None:
     parser.add_argument("--days", type=int, default=7, help="Clean committed/failed batches older than this many days.")
     parser.add_argument("--stale-hours", type=int, default=6, help="Mark processing batches older than this many hours as failed.")
     args = parser.parse_args()
+    if args.days < 1 or args.stale_hours < 1:
+        parser.error("days and stale-hours must be positive")
 
     with connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                UPDATE t_import_log
-                SET status = 'failed',
-                    remark = '导入任务超时未更新，已由清理脚本关闭'
+                SELECT batch_no FROM t_import_log
                 WHERE status = 'processing'
                   AND import_time < DATE_SUB(NOW(), INTERVAL %(hours)s HOUR)
                 """,
                 {"hours": args.stale_hours},
             )
-            stale = cur.rowcount
+            candidates = list(cur.fetchall())
 
+    stale = 0
+    for batch in candidates:
+        try:
+            with connection() as conn:
+                recover_stale_batch(conn, {"permissions": {"admin"}}, batch["batch_no"],
+                                    min_idle_seconds=args.stale_hours * 3600)
+            stale += 1
+        except HTTPException as exc:
+            if exc.status_code not in {404, 409}:
+                raise
+
+    with connection() as conn:
+        with conn.cursor() as cur:
             cur.execute(
                 """
                 DELETE t
